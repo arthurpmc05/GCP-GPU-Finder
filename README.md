@@ -1,93 +1,96 @@
-# GCP GPU Finder
+# gcp_gpu_finder
 
+Find NVIDIA GPU capacity on Google Cloud and keep trying until it is held.
 
+One Python file, standard library only, nothing to install. It signs you in through the Google Cloud CLI (or the metadata server on a Compute Engine VM), checks your project, asks what the GPUs will run, shows quota and availability as two separate things, then sweeps regions, zones, machine types and acquisition methods, for days if needed, until the GPUs you asked for are yours. Everything it does is printed as it happens and written to an append-only audit log.
 
-## Getting started
+## Requirements
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- Python 3.9 or newer. No third-party packages.
+- A Google Cloud account with a project, or a project to create one in. If `gcloud` is missing, `setup` offers to install Google's official archive for your OS and CPU, without administrator rights.
+- Permissions are listed in the file header under PERMISSIONS and checked for you by `doctor`; `roles/compute.viewer` is enough to plan.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Quick Start
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/arthurpmc5/gcp-gpu-finder.git
-git branch -M main
-git push -uf origin main
+python3 gcp_gpu_finder.py setup      # install gcloud if needed, sign in, pick the project, enable APIs
+python3 gcp_gpu_finder.py plan       # quota, availability and options for what you want; creates nothing
+python3 gcp_gpu_finder.py            # the wizard asks everything, then holds the capacity
 ```
 
-## Integrate with your tools
+Every question has a default, a skip (`>`), a skip-all (`>>`), a back (`<`) and a flag, so the same run can be scripted. Ctrl-C stops new attempts, prints a summary and asks whether to keep or release what was obtained.
 
-* [Set up project integrations](https://gitlab.com/arthurpmc5/gcp-gpu-finder/-/settings/integrations)
+## Commands
 
-## Collaborate with your team
+- `plan` analysis only: quota, availability, prices and the options that fit.
+- `setup` install gcloud, sign in, choose the project, enable the APIs, create a network if the project has none; each step asks first.
+- `doctor` environment and permission report, with the exact command or link that fixes each finding.
+- `run --config F` replay a saved run's answers; add `--yes --session logged` for an unattended run.
+- `status RUN_ID`, `resume RUN_ID`, `release RUN_ID` what a run holds, continue a stopped run, delete only what that run created.
+- `log [RUN_ID|PATH]` read an audit log back; `knobs` every tunable setting and its default; `self-test` offline checks of this file.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+`--help` on any command lists its flags. The file header is the full manual.
 
-## Test and Deploy
+## How It Holds Capacity
 
-Use the built-in continuous integration in GitLab.
+You choose one method per run. All of them create real, billed resources in your project.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+- `reservation` on-demand reservation, capacity held in your name with no VMs running yet.
+- `vms` standard on-demand VMs created in bulk.
+- `spot` Spot VMs, much cheaper, reclaimable by Google at any time.
+- `flex` and `flex-group` flex-start (Dynamic Workload Scheduler) VMs, queued per request, discounted, deleted after their run time.
+- `calendar` calendar-mode future reservation for the A3 and A4 families, no quota needed, billed for the whole period.
 
-***
+## What It Never Does
 
-# Editing this README
+- Install software, sign in, enable an API or create a network without asking first (`--install-missing` is the only way to pre-approve those).
+- Link billing, change IAM, edit organization policies, or touch a resource it did not create. Everything a run creates carries the label `gpu-finder-run=<run id>` or a name starting with `gpuf-<run>`, and `release` deletes only those.
+- File a quota increase unless you opted in, quota is confirmed to be the limit, and you typed `yes` on a screen showing the exact request. It files each quota once and never re-files or escalates.
+- Store, print or log an access token, a key or a password.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+## Credentials
 
-## Suggestions for a good README
+The tool never handles long-lived credentials itself. It holds short-lived access tokens in memory and nothing else.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+- Tokens come from `gcloud auth print-access-token` (optionally with `--impersonate-service-account`), from the Compute Engine metadata server, or from `GPUF_ACCESS_TOKEN` when you supply one. They are refreshed on a schedule and never written to disk, the audit log or the screen. If the token command fails, only its error text is reported, never its output.
+- A key file (`--key-file`) is handed to `gcloud auth login --cred-file` and read by the tool only for its type, account and project. When another account is already active, the sign-in goes into a separate gcloud configuration (`GPUF_SETUP_GCLOUD_CONFIG`, default `gpu-finder`) so your own setup is untouched.
+- gcloud's own token cache lives where gcloud keeps it; in an ephemeral session it lives in a tmpfs copy that is deleted when the session ends.
+- Network calls go to `*.googleapis.com`, `huggingface.co` (a chosen model's public architecture file, no token), the metadata server on GCE, and `dl.google.com` only when setup installs gcloud. `HTTPS_PROXY`, `NO_PROXY`, `--ca-bundle` and `GPUF_CA_BUNDLE` are honored. The gcloud download is verified over TLS; set `GPUF_GCLOUD_SHA256` to the checksum Google publishes to pin it.
 
-## Name
-Choose a self-explaining name for your project.
+## Sessions And Files
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Before anything is read or written the tool asks whether the session is `logged` or `ephemeral` (`--session`, or `GPUF_SESSION`).
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+- `logged` writes under `GPUF_HOME` (default `~/.gcp_gpu_finder`): `setup.json`, `logs/<command>-<time>-<pid>.jsonl`, `runs/<run id>/{state.json,config.json,events.jsonl,summary.txt}` and `cache/`. Runs can be resumed, released and read back by id.
+- `ephemeral` writes nothing to this computer. Run state, answers and caches stay in memory; gcloud runs on a private copy of its configuration in a tmpfs folder (`/dev/shm`, `$XDG_RUNTIME_DIR` or `GPUF_EPHEMERAL_DIR`) that is deleted at exit, including after Ctrl-C or SIGTERM. Capacity obtained is still real and is found later by its label. Swap without encryption can still leave traces of RAM on disk; that is outside the tool's control.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Audit logs, run state and `setup.json` are created readable by your user only, in folders created the same way. The log records the signed-in account and project, your user name, working folder and command line, every answer, and at trace level the full body of each write request (for a quota request that includes the contact email and justification you gave). Treat a log as yours before sharing it.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Configuration
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Every limit, interval, path, color and threshold is an environment variable with a documented default; `python3 gcp_gpu_finder.py knobs` prints all of them with their meaning. Nothing needs editing in the source. Flags override saved answers, which override knob defaults.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Unattended Runs
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```
+python3 gcp_gpu_finder.py run --config ~/.gcp_gpu_finder/runs/<run id>/config.json --yes --session logged
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+Add `--install-missing` and `--key-file` to let a scripted run install gcloud and sign in. For runs of days, sign in with a service account (`--impersonate-service-account`), run under `nohup`, `screen` or `tmux`, and use `--plain` for a line log. Exit codes: 0 goal reached or plan finished, 1 error before the run, 2 stopped before the goal, 3 blocked for a named reason, 130 cancelled at a question.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## Verifying The File
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+```
+python3 -m py_compile gcp_gpu_finder.py
+python3 gcp_gpu_finder.py self-test
+```
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+The self-test runs offline and covers the parser, the request planner, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
+
+## Reporting A Problem
+
+Open an issue with the command you ran, the verdict line and the relevant lines of the audit log (`log --last N`), after reading them for anything you would not share. Tokens never appear in a log; account names, project ids and your answers do.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Apache License, Version 2.0; the full text is in `LICENSE`. Use, change and redistribute it freely, keep the `LICENSE` and `NOTICE` files and the copyright line in the script header with any copy, and mark the files you change. `NOTICE` carries the attribution that section 4(d) of the license requires derivative works to keep.

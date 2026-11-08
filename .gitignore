@@ -1,0 +1,10 @@
+# Python build artifacts and linter caches
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Local validation evidence: real project ids, accounts and terminal captures; never published
+validation/
+
+# Terminal drivers that produce that evidence; their headers say "not shipped"
+tests/
