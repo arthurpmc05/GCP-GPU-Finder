@@ -2,7 +2,62 @@
 
 Find NVIDIA GPU capacity on Google Cloud and keep trying until it is held.
 
-One Python file, standard library only, nothing to install. It signs you in through the Google Cloud CLI (or the metadata server on a Compute Engine VM), checks your project, asks what the GPUs will run, shows quota and availability as two separate things, then sweeps regions, zones, machine types and acquisition methods, for days if needed, until the GPUs you asked for are yours. Everything it does is printed as it happens and written to an append-only audit log.
+One Python file, standard library only, nothing to install. It signs you in through the Google Cloud CLI (or the metadata server on a Compute Engine VM), checks your project, works out how many GPUs your NVIDIA model or product actually needs, tells you whether quota or availability is what stands in your way, files the exact quota increase if you ask it to, then sweeps regions, zones, machine types and acquisition methods, for days or weeks if needed, taking GPUs as they appear until every one you asked for is yours. Everything it does is printed as it happens and written to an append-only audit log.
+
+## Why It Exists
+
+Getting GPUs on a cloud is two problems wearing one error message. Quota is a limit Google sets on your project; availability is whether Google has free hardware in a zone right now. Most people discover which one is blocking them by reading `ZONE_RESOURCE_POOL_EXHAUSTED` and `QUOTA_EXCEEDED` for an afternoon. This tool separates the two, reads your real limits from the Cloud Quotas API, prints a one-sentence verdict, fixes what can be fixed from your side, and then does the patient part: trying the best option first, then every alternative you allowed, over and over, until the request is fully met.
+
+## What It Does
+
+### Checks Your Quota And Says Exactly What Blocks You
+
+- Reads quota limits and current usage per region and per GPU family from the Cloud Quotas API (falling back to Compute's own quota view and saying so), for the exact machine types and acquisition method you chose, because reservations, on-demand VMs, Spot, flex-start and calendar mode are counted against different quotas.
+- Shows headroom per region in VMs and in GPUs, names the binding quota and its usage over limit, and shows the hourly price from the public Cloud Billing catalog beside it.
+- Ends the analysis with a verdict line: quota allows the full goal and the loop now hunts capacity; quota stops the plan before capacity matters; or quota caps the plan at a smaller number, so the loop hunts capacity for those and the rest need more quota.
+- `plan` does all of this and creates nothing.
+
+### Requests Quota Increases Correctly, Once
+
+- Opt-in (`--quota-request offer` or `file`). Nothing is filed until quota is confirmed to be the limit for your plan and you typed `yes` on a screen that shows each request in full.
+- Requests only what the plan still needs: current usage plus the shortfall, in one region (or split across regions with `--quota-split`), never a round number plucked from the air.
+- Files each quota once, never re-files or escalates, checks eligibility first (billing, usage history, whether Google takes requests for that quota), lists requests already on file from any tool, and then polls the status of what it filed during the run and in `status`.
+- Carries your contact email, use case and justification exactly as you typed them.
+
+### Sizes GPUs For NVIDIA Models In Vertex AI Model Garden
+
+- Lists NVIDIA's models in Vertex AI Model Garden live from the Agent Platform API, every version, with every machine type, GPU type, GPU count and serving setting Google tested for it. Only GPUs Google tested for that model are offered.
+- Asks two questions about your traffic: the longest request (prompt plus answer, in tokens) and the peak requests in flight at once, across all copies.
+- Reads the model's published architecture and weight size from the repository Model Garden deploys, and estimates how many requests one copy of the model holds at once on each tested machine type: GPU memory left after the weights, over the cache a request needs, capped by Google's own concurrency setting.
+- Recommends the total: model copies needed, VM instances needed, GPUs in total, fewest GPUs first, and makes that recommendation the default for every later question. GPU types and machine types that cannot fit the model are hidden and the reason is printed.
+
+### Sizes GPUs For NVIDIA Products On Google Cloud Marketplace
+
+- Knows the NVIDIA products Google documents for Google Cloud: Omniverse Development and Enterprise Workstations, Isaac Sim Development Workstation, Kit App Streaming, BioNeMo and NIM, each with the GPU rule from Google's own page and links to it.
+- Reads NVIDIA's Marketplace VM images live from NVIDIA's image project, newest current image per product, with its operating system, CPU architecture, minimum disk and whether Google charges a license fee, and boots your VMs from the one you pick.
+- Asks how many workstations, streaming nodes or jobs run at the same time, then recommends machine type, VM count and GPUs in total the same way it does for models.
+
+### Recommends From What Is Available And What You Need
+
+- The GPU model, machine types and GPU total default to the sizing recommendation; the machine types are listed in order of how easy they are to obtain, and the regions that actually offer them are grouped by geography.
+- Preferred regions are tried in your order. Fallback regions are ranked by Google's capacity advisor score, then by price, so the loop goes where hardware is most likely to be free and cheapest first.
+- Prices are shown per method (on-demand, Spot, flex-start, calendar) for every region and machine type, and an optional hourly spending cap for everything held keeps the loop from buying past your budget.
+- The `doctor` command checks sign-in, project, billing, enabled APIs, the IAM permissions each method needs, organization policies, networks and usable regions, and suggests the smallest predefined role that fixes anything missing. Menus grey out what your account cannot do rather than failing later.
+
+### Searches As Narrowly Or As Broadly As You Want
+
+- Narrow: one region, one machine type, one method, one zone at a time; or a cluster layout that only accepts whole groups of VMs in a single zone.
+- Broad: regions by name, by group (`asia-pacific`, `europe`) or by prefix (`asia`), a fallback list, an exclusion list, several machine types in preference order, and `all` at any question to open it up to every region or every machine type that offers your GPU.
+- Six ways to hold capacity, chosen per run: on-demand reservation, on-demand VMs, Spot VMs, flex-start VMs and flex-start groups (Dynamic Workload Scheduler), and calendar-mode future reservations for the A3 and A4 families.
+- Every question accepts a flag, so the same search can be scripted; `--dry-run` runs one full pass of the search without a single write.
+
+### Runs Until The Entire Request Is Met
+
+- Loops for days or weeks, one attempt at a time so a large ladder of regions, zones and sizes is swept every few minutes without hammering your project's rate limits (it reads your real per-region limits and uses a fraction of them).
+- Takes capacity as it appears: each attempt asks for exactly what is still missing, sized to the remaining GPUs, the quota headroom in that region and the spending cap, never more than the goal unless you allow overshoot. Held GPUs accumulate across zones, machine types and attempts until held equals goal.
+- Options that are quota-bound are parked and re-verified on a schedule instead of being retried uselessly; filed quota requests are polled, and when one is granted the parked options come back into the sweep.
+- The live dashboard shows which machine type, zone and method is being tried, the Google call and operation in flight, what comes next and how far the sweep has got; `--plain` gives the same as a line log for `nohup`, `screen` or `tmux`.
+- Stop with Ctrl-C at any time: new attempts stop, queued flex-start requests are cancelled so nothing appears later unseen, a summary prints, and you choose to keep or release what was obtained. `resume RUN_ID` picks a stopped run back up; `--maintain` keeps running after the goal and replaces anything Google reclaims.
 
 ## Requirements
 
@@ -19,6 +74,13 @@ python3 gcp_gpu_finder.py            # the wizard asks everything, then holds th
 ```
 
 Every question has a default, a skip (`>`), a skip-all (`>>`), a back (`<`) and a flag, so the same run can be scripted. Ctrl-C stops new attempts, prints a summary and asks whether to keep or release what was obtained.
+
+A sized, scripted example: size for an NVIDIA model in Model Garden at a given context length and peak concurrency, search a preferred region with the rest of a continent as fallback, hold the capacity as Spot VMs, and let the tool offer a quota request if quota turns out to be the limit.
+
+```
+python3 gcp_gpu_finder.py --workload model --model super-120b-a12b-fp8 --context 8192 --peak 32 \
+    --region asia-southeast1 --fallback asia-pacific --method spot --quota-request offer --session logged
+```
 
 ## Commands
 
@@ -85,7 +147,7 @@ python3 -m py_compile gcp_gpu_finder.py
 python3 gcp_gpu_finder.py self-test
 ```
 
-The self-test runs offline and covers the parser, the request planner, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
+The self-test runs offline and covers the parser, the request planner, the quota verdict, the Model Garden sizing, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
 
 ## Reporting A Problem
 
