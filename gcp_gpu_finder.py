@@ -309,7 +309,7 @@ if sys.version_info < (3, 9):
     sys.exit(f"Python {sys.version.split()[0]} is too old: this script needs Python 3.9 or newer "
              "(python.org/downloads, or your package manager's python3 package)")
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 UA = f"gcp-gpu-finder/{VERSION} (python {sys.version_info.major}.{sys.version_info.minor})"
 COMPUTE = "https://compute.googleapis.com/compute/v1"
 COMPUTE_BETA = "https://compute.googleapis.com/compute/beta"
@@ -6115,7 +6115,7 @@ def quota_request_flow(ctx, req, regions, st, save):
     shape0 = todo[-1].get("shape") or req["shapes"][0]
     nodes0 = next((r["nodes"] for r in todo if r.get("nodes")), None)
     default_just = req.get("justification") or (
-        f"{req.get('use_case') or 'AI workloads'}: we need {fnum(req['goal'])} NVIDIA {label} GPUs"
+        f"{req.get('use_case') or 'AI workloads'}: we need {fnum(req['goal'])} {label} GPUs"
         + (f" ({nodes0} x {shape0})" if nodes0 else "") + f" in {region0} via {METHOD_LABEL[req['method']]}; "
         f"this request covers exactly that shortfall above current usage.")
     just = ask.ask("Justification shown to Google (edit as needed)", default_just, flag="--justification")

@@ -10,12 +10,18 @@ Getting GPUs on a cloud is two problems wearing one error message. Quota is a li
 
 ## What It Does
 
+Every screenshot below is a real run of this file against Google Cloud, rendered from the bytes of its terminal: version 1.6.1 on 2026-11-08 unless the caption says otherwise. The signed-in account, the project id, number and name, and every email address are painted over as grey bars. `docs/screenshots/manifest.json` records each image's command, the answers typed, the capture time and its sha256.
+
 ### Checks Your Quota And Says Exactly What Blocks You
 
 - Reads quota limits and current usage per region and per GPU family from the Cloud Quotas API (falling back to Compute's own quota view and saying so), for the exact machine types and acquisition method you chose, because reservations, on-demand VMs, Spot, flex-start and calendar mode are counted against different quotas.
 - Shows headroom per region in VMs and in GPUs, names the binding quota and its usage over limit, and shows the hourly price from the public Cloud Billing catalog beside it.
 - Ends the analysis with a verdict line: quota allows the full goal and the loop now hunts capacity; quota stops the plan before capacity matters; or quota caps the plan at a smaller number, so the loop hunts capacity for those and the rest need more quota.
 - `plan` does all of this and creates nothing.
+
+![Quota per region, capacity advisor scores, ways to reach the goal and the verdict](docs/screenshots/quota-verdict.png)
+
+*`plan` for 2 x NVIDIA RTX PRO 6000 as Spot VMs, Singapore first and the rest of Asia-Pacific as fallback: quota per region and machine type, Google's capacity advisor score per zone, the ways to reach the goal with prices, and the verdict. Here quota, not hardware, is what blocks the plan.*
 
 ### Requests Quota Increases Correctly, Once
 
@@ -24,6 +30,14 @@ Getting GPUs on a cloud is two problems wearing one error message. Quota is a li
 - Files each quota once, never re-files or escalates, checks eligibility first (billing, usage history, whether Google takes requests for that quota), lists requests already on file from any tool, and then polls the status of what it filed during the run and in `status`.
 - Carries your contact email, use case and justification exactly as you typed them.
 
+![The quota request table, validation by Google and the typed confirmation](docs/screenshots/quota-request.png)
+
+*2 x NVIDIA L4 as on-demand VMs in us-central1: the two quotas that block the plan, each requested at usage plus the shortfall, validated by Google without filing, then the typed confirmation. It was answered `no` for this screenshot, so nothing was filed.*
+
+![The tool refusing to file a partial set of quota requests](docs/screenshots/quota-request-guard.png)
+
+*When one of the quotas a plan needs was denied before, the tool files none of them: raising the others alone would not let the plan run.*
+
 ### Sizes GPUs For NVIDIA Models In Vertex AI Model Garden
 
 - Lists NVIDIA's models in Vertex AI Model Garden live from the Agent Platform API, every version, with every machine type, GPU type, GPU count and serving setting Google tested for it. Only GPUs Google tested for that model are offered.
@@ -31,11 +45,23 @@ Getting GPUs on a cloud is two problems wearing one error message. Quota is a li
 - Reads the model's published architecture and weight size from the repository Model Garden deploys, and estimates how many requests one copy of the model holds at once on each tested machine type: GPU memory left after the weights, over the cache a request needs, capped by Google's own concurrency setting.
 - Recommends the total: model copies needed, VM instances needed, GPUs in total, fewest GPUs first, and makes that recommendation the default for every later question. GPU types and machine types that cannot fit the model are hidden and the reason is printed.
 
+![NVIDIA models listed live from Model Garden with the machine types Google tested](docs/screenshots/model-garden-models.png)
+
+*NVIDIA's models read live from Model Garden, each with the machine types Google tested it on.*
+
+![Sizing Nemotron 3 Super 120B FP8 for 100 requests at 32768 tokens](docs/screenshots/model-garden-sizing.png)
+
+*NVIDIA Nemotron 3 Super 120B FP8 at 32,768 tokens and 100 requests in flight: every machine type that holds a whole copy, the requests one copy serves, estimated from the model's weights and attention layout, and the recommendation of one g4-standard-96 with 2 x RTX PRO 6000, which becomes the default.*
+
 ### Sizes GPUs For NVIDIA Products On Google Cloud Marketplace
 
 - Knows the NVIDIA products Google documents for Google Cloud: Omniverse Development and Enterprise Workstations, Isaac Sim Development Workstation, Kit App Streaming, BioNeMo and NIM, each with the GPU rule from Google's own page and links to it.
 - Reads NVIDIA's Marketplace VM images live from NVIDIA's image project, newest current image per product, with its operating system, CPU architecture, minimum disk and whether Google charges a license fee, and boots your VMs from the one you pick.
 - Asks how many workstations, streaming nodes or jobs run at the same time, then recommends machine type, VM count and GPUs in total the same way it does for models.
+
+![NVIDIA products on Google Cloud and the sizing for four Isaac Sim workstations](docs/screenshots/marketplace-sizing.png)
+
+*The NVIDIA products on Google Cloud, the last one read live from NVIDIA's Marketplace image project, and four Isaac Sim Development Workstations sized by Google's GPU rule: 4 x g2-standard-4 with one L4 each is recommended.*
 
 ### Recommends From What Is Available And What You Need
 
@@ -44,6 +70,10 @@ Getting GPUs on a cloud is two problems wearing one error message. Quota is a li
 - Prices are shown per method (on-demand, Spot, flex-start, calendar) for every region and machine type, and an optional hourly spending cap for everything held keeps the loop from buying past your budget.
 - The `doctor` command checks sign-in, project, billing, enabled APIs, the IAM permissions each method needs, organization policies, networks and usable regions, and suggests the smallest predefined role that fixes anything missing. Menus grey out what your account cannot do rather than failing later.
 
+![The doctor report: read-only checks of APIs, billing, permissions, policies and networks](docs/screenshots/doctor-checks.png)
+
+*`doctor`: 26 read-only checks of sign-in, project, APIs, billing, the permissions each method needs, organization policies and networks, each naming the Google API it asked.*
+
 ### Searches As Narrowly Or As Broadly As You Want
 
 - Narrow: one region, one machine type, one method, one zone at a time; or a cluster layout that only accepts whole groups of VMs in a single zone.
@@ -51,13 +81,25 @@ Getting GPUs on a cloud is two problems wearing one error message. Quota is a li
 - Six ways to hold capacity, chosen per run: on-demand reservation, on-demand VMs, Spot VMs, flex-start VMs and flex-start groups (Dynamic Workload Scheduler), and calendar-mode future reservations for the A3 and A4 families.
 - Every question accepts a flag, so the same search can be scripted; `--dry-run` runs one full pass of the search without a single write.
 
+![Regions grouped by geography, preferred and fallback answers, and the six holding methods](docs/screenshots/search-regions.png)
+
+*The regions that offer the chosen machine types, grouped by geography; one preferred region, a whole group as fallback, and the six ways to hold capacity with how each one bills.*
+
 ### Runs Until The Entire Request Is Met
 
 - Loops for days or weeks, one attempt at a time so a large ladder of regions, zones and sizes is swept every few minutes without hammering your project's rate limits (it reads your real per-region limits and uses a fraction of them).
 - Takes capacity as it appears: each attempt asks for exactly what is still missing, sized to the remaining GPUs, the quota headroom in that region and the spending cap, never more than the goal unless you allow overshoot. Held GPUs accumulate across zones, machine types and attempts until held equals goal.
-- Options that are quota-bound are parked and re-verified on a schedule instead of being retried uselessly; filed quota requests are polled, and when one is granted the parked options come back into the sweep.
+- Options that are quota-bound are not retried uselessly: quota and usage are re-read during the run (`GPUF_QUOTA_REFRESH_S`), each quota-bound option gets a single verification attempt on a schedule (`GPUF_QUOTA_VERIFY_S`), filed quota requests are polled (`GPUF_QUOTA_POLL_S`), and when quota rises those options come back into the sweep.
 - The live dashboard shows which machine type, zone and method is being tried, the Google call and operation in flight, what comes next and how far the sweep has got; `--plain` gives the same as a line log for `nohup`, `screen` or `tmux`.
 - Stop with Ctrl-C at any time: new attempts stop, queued flex-start requests are cancelled so nothing appears later unseen, a summary prints, and you choose to keep or release what was obtained. `resume RUN_ID` picks a stopped run back up; `--maintain` keeps running after the goal and replaces anything Google reclaims.
+
+![A recorded hunt: three stockouts, then a reservation held and the goal met](docs/screenshots/hunt-recorded.png)
+
+*A real hold, recorded on 2026-11-07 with version 1.1.0: g2-standard-4 was out of stock in three zones, the next option, g2-standard-8 in us-central1-a, was obtained, and the goal of 1 GPU was met in 1m55s. The reservation was released afterwards.*
+
+![The live dashboard of a hunt waiting for quota](docs/screenshots/hunt-live.png)
+
+*Version 1.6.1 hunting 1 x NVIDIA L4 as an on-demand reservation in us-central1 and the US while the project's only GPU of quota was in use: all 26 options are quota-bound, none is attempted, and the loop keeps running until quota changes instead of giving up. Stopped with Ctrl-C for this screenshot; it held nothing.*
 
 ## Requirements
 
@@ -113,6 +155,10 @@ You choose one method per run. All of them create real, billed resources in your
 ## Credentials
 
 The tool never handles long-lived credentials itself. It holds short-lived access tokens in memory and nothing else.
+
+![The start of every run: what the tool contacts, what it never does, and the sign-in step](docs/screenshots/doctor-transparency.png)
+
+*Every run opens by stating what it contacts and what it never does, then shows where its access token comes from: `gcloud auth print-access-token`, kept in memory only.*
 
 - Tokens come from `gcloud auth print-access-token` (optionally with `--impersonate-service-account`), from the Compute Engine metadata server, or from `GPUF_ACCESS_TOKEN` when you supply one. They are refreshed on a schedule and never written to disk, the audit log or the screen. If the token command fails, only its error text is reported, never its output.
 - A key file (`--key-file`) is handed to `gcloud auth login --cred-file` and read by the tool only for its type, account and project. When another account is already active, the sign-in goes into a separate gcloud configuration (`GPUF_SETUP_GCLOUD_CONFIG`, default `gpu-finder`) so your own setup is untouched.
