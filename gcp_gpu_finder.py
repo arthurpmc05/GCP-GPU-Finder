@@ -102,6 +102,11 @@ KEPT OR EPHEMERAL (asked before anything runs; --session logged|ephemeral, or GP
 TRANSPARENCY AND AUDIT
   Every step says what it does and why, which Google API, file or command it uses, what it found
   and how long it took; every check names the API that answered it. Nothing runs unseen.
+  Every read that goes over the network is named on screen before it is made. A step that reads
+  many things (repositories, blueprint pages, regions) reports each one as it finishes. When a
+  step has printed nothing for GPUF_PROGRESS_S seconds (default 5), it says what it is still
+  reading and for how long, with the page and the count so far for a long list, so a slow read
+  is never mistaken for a hang. A source that cannot be read is reported the moment it fails.
   Screen (--verbosity, or GPUF_VERBOSITY; default normal):
     quiet     the audit log's path, questions, results, warnings and errors (-q)
     normal    every step and check, and where each read comes from: a cache file with its age,
@@ -451,6 +456,8 @@ MARKETPLACE_IMAGE_PROJECT = knob("MARKETPLACE_IMAGE_PROJECT", "nvidia-ngc-public
                                                                                   "comma separated")
 TARGET = knob("TARGET", "vertex", "where a model is deployed, which decides how it is sized: vertex (a Vertex AI endpoint from Model Garden, only the "
                                   "configurations Google tested, one copy per VM) or nim (NVIDIA NIM on GKE or a VM, NVIDIA's published NIM profiles)")
+PROGRESS_S = knob("PROGRESS_S", 5, "seconds a step may go without a new line on screen before it says what it is still reading, and for how "
+                                    "long; 0 turns these lines off")
 WEB_TIMEOUT_S = knob("WEB_TIMEOUT_S", 30, "socket deadline for one read of a published page or public catalog (Google and NVIDIA documentation, NGC, GitHub)")
 DOCS_TTL_S = knob("DOCS_TTL_S", 86400, "seconds a published page or public catalog read is reused before it is read again")
 DOC_PAGES = knob("DOC_PAGES", "accel=https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines,"
@@ -771,6 +778,9 @@ class Term:
         self.in_dash = False
         self.dead = False
         self.lock = threading.RLock()
+        # when the screen last changed, and whether a question is waiting for typing (nothing may be printed over it)
+        self.last_out = time.time()
+        self.asking = False
         # the shortcut bar: a function giving its lines for a width, and (screen rows, bar rows) while it is fenced off
         self.footer_fn = None
         self.footer_rows = None
@@ -917,6 +927,7 @@ class Term:
             try:
                 self.out.write(text)
                 self.out.flush()
+                self.last_out = time.time()
             except (OSError, ValueError):
                 # the terminal went away (closed window, broken pipe); keep running, keep logging
                 self.dead = True
@@ -1094,9 +1105,40 @@ class Report:
         self.sym = ("\u25b8", "\u2713", "\u00b7") if term.utf else (">", "+", "-")
         events.printer = self.show
         events.report = self
+        # the steps open now, innermost last, as (title, start), and the thread that says what a quiet step is still reading
+        self.open_steps = []
+        self.beat_thread = None
 
     def pad(self):
         return "    " * self.depth + "  "
+
+    def start_beat(self):
+        if self.beat_thread is None and PROGRESS_S > 0:
+            self.beat_thread = threading.Thread(target=self._beat_loop, name="progress", daemon=True)
+            self.beat_thread.start()
+
+    def _beat_loop(self):
+        while not self.t.dead:
+            time.sleep(min(1.0, PROGRESS_S / 2))
+            try:
+                self.beat()
+            except Exception as e:  # a screen line must never stop the work; the failure is logged and the lines stop
+                self.ev.write("note", level="warn", msg=f"progress lines stopped: {type(e).__name__}: {e}")
+                return
+
+    def beat(self):
+        """When a step has printed nothing for GPUF_PROGRESS_S, one line saying what it is still reading and for how long."""
+        t, steps = self.t, list(self.open_steps)
+        if self.level < 1 or t.in_dash or t.dead or t.asking or self.hunting or not steps or now() - t.last_out < PROGRESS_S:
+            return
+        title, t0 = steps[-1]
+        busy = in_flight()
+        if busy:
+            what, secs = busy[0]
+            text = f"{human_dur(now() - t0)} in: reading {what} ({human_dur(secs)})" + (f"; {len(busy) - 1} more read(s) in flight" if len(busy) > 1 else "")
+        else:
+            text = f"{human_dur(now() - t0)} in: still working on {title.lower()}"
+        t.line(self.pad() + t.s(("\u2026 " if t.utf else "... ") + text, "gr"))
 
     def show(self, rec):
         t, kind = self.t, rec["kind"]
@@ -1137,16 +1179,24 @@ class Step:
             t.line(r.pad() + t.s(f"{r.sym[0]} {self.title}", "c", "b") + (t.s(f"  {self.why}", "gr") if self.why else ""))
         r.depth += 1
         self.t0 = now()
+        r.open_steps.append((self.title, self.t0))
+        r.start_beat()
         return self
 
     def say(self, text, style=None):
         self.rep.say(text, style)
+
+    def fetch(self, text):
+        """A read that goes over the network, always on screen."""
+        self.rep.say(text)
 
     def result(self, text, style="g"):
         self.res, self.res_style = text, style
 
     def __exit__(self, et, e, tb):
         r, t = self.rep, self.rep.t
+        if r.open_steps:
+            r.open_steps.pop()
         dur = now() - self.t0
         if et is None:
             r.ev.write("step", phase="done", title=self.title, result=visible_text(self.res or "done"), seconds=round(dur, 2),
@@ -1250,10 +1300,14 @@ class Prompter:
         if self.t.painted:
             # paint the answer line first, so typed text sits on the theme background too
             self.t.write(self.t.base + "\x1b[K")
+        self.t.asking = True
         try:
             return self.reader(text)
         except EOFError:
             raise SystemExit("input closed before the question was answered")
+        finally:
+            self.t.asking = False
+            self.t.last_out = time.time()
 
     def _need(self, q, flag):
         raise SystemExit(f"unattended run has no answer for: {q}" + (f" (pass {flag})" if flag else ""))
@@ -1699,10 +1753,14 @@ class Prompter:
         import getpass
         self.t.dash_stop()
         self._gap()
+        self.t.asking = True
         try:
             v = getpass.getpass(f"{q}: ")
         except (EOFError, KeyboardInterrupt):
             v = ""
+        finally:
+            self.t.asking = False
+            self.t.last_out = time.time()
         audit("answer", q=q, a="(hidden)" if v else "(none)")
         return v.strip() or None
 
@@ -1812,8 +1870,9 @@ def run_gcloud(gcloud, args, config=None):
     """One gcloud call with no terminal input, so a sign-in prompt can never hang the run; recorded in the audit trail."""
     t0 = now()
     try:
-        r = subprocess.run([gcloud] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GCLOUD_TIMEOUT_S,
-                           env=gcloud_env(config))
+        with loading("gcloud " + " ".join(a for a in args if not a.startswith("-"))[:80]):
+            r = subprocess.run([gcloud] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GCLOUD_TIMEOUT_S,
+                               env=gcloud_env(config))
     except subprocess.TimeoutExpired:
         audit("cmd", argv=gcloud_argv(gcloud, args, config), rc=None, ms=int((now() - t0) * 1000), withheld="no answer; stopped at the deadline")
         raise AuthError("gcloud_timeout", f"gcloud {' '.join(args[:3])} gave no answer within {GCLOUD_TIMEOUT_S} s",
@@ -1989,6 +2048,42 @@ def size_text(n):
 def audit(kind, **fields):
     if AUDIT[0]:
         AUDIT[0].write(kind, **fields)
+
+
+# every read in flight (a Google API call, a published page, NGC, GitHub, a gcloud command), from any thread, so a step that waits
+# on one can say what it is waiting for
+INFLIGHT = {}
+INFLIGHT_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def loading(what):
+    token = object()
+    with INFLIGHT_LOCK:
+        INFLIGHT[id(token)] = (what, now())
+    try:
+        yield
+    finally:
+        with INFLIGHT_LOCK:
+            INFLIGHT.pop(id(token), None)
+
+
+def in_flight():
+    """What is being read right now, longest waiting first, as (what, seconds)."""
+    with INFLIGHT_LOCK:
+        items = list(INFLIGHT.values())
+    t = now()
+    return sorted(((w, t - t0) for w, t0 in items), key=lambda x: -x[1])
+
+
+def call_what(method, url, note=None, own=None):
+    """A Google API call as the screen names it: host, method and path, without your own project (another one, such as a public image
+    project, stays), e.g. compute.googleapis.com GET /aggregated/machineTypes."""
+    u = urllib.parse.urlparse(url)
+    path = re.sub(r"^/(compute/)?v\d+(beta\d*|alpha)?(?=/)", "", u.path)
+    if own:
+        path = path.replace(f"/projects/{own}", "", 1)
+    return f"{u.netloc} {method} {path or '/'}" + (f", {note}" if note else "")
 
 
 class Events:
@@ -2271,12 +2366,13 @@ class Api:
         self._phase(f"waiting {human_dur(seconds)} for this minute's API budget")
         self.sleep(seconds)
 
-    def call(self, method, url, params=None, body=None, retries=None, quiet=False):
+    def call(self, method, url, params=None, body=None, retries=None, quiet=False, note=None):
         if params:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}, doseq=True)
         self.current = {"m": method, "url": url, "t0": now(), "since": now(), "phase": "sending"}
         try:
-            return self._call(method, url, body, retries)
+            with loading(call_what(method, url, note, self.project)):
+                return self._call(method, url, body, retries)
         finally:
             self.current = None
 
@@ -2392,12 +2488,14 @@ class Api:
 
     def pages(self, url, key, params=None):
         params = dict(params or {})
-        tok = None
+        tok, n, got = None, 0, 0
         while True:
             if tok:
                 params["pageToken"] = tok
-            body = self.call("GET", url, params=params)
+            n += 1
+            body = self.call("GET", url, params=params, note=f"page {n}" + (f", {got:,} {key} read so far" if got else ""))
             for item in body.get(key) or []:
+                got += 1
                 yield item
             tok = body.get("nextPageToken")
             if not tok:
@@ -2408,11 +2506,14 @@ class Api:
         key = key or kind
         params = dict(params or {})
         params.setdefault("maxResults", 500)
-        out, tok = {}, None
+        out, tok, n = {}, None, 0
         while True:
             if tok:
                 params["pageToken"] = tok
-            body = self.call("GET", f"{COMPUTE}/projects/{self.project}/aggregated/{kind}", params=params)
+            n += 1
+            got = sum(len(v) for v in out.values())
+            body = self.call("GET", f"{COMPUTE}/projects/{self.project}/aggregated/{kind}", params=params,
+                             note=f"page {n}" + (f", {got:,} {kind} read so far" if got else ""))
             for scope, v in (body.get("items") or {}).items():
                 items = v.get(key) or []
                 if items:
@@ -2694,8 +2795,9 @@ def doc_url(key):
     return pages.get(key)
 
 
-def web_get(ctx, url, accept="application/json", headers=None, etag=None):
-    """GET one URL outside Google Cloud's APIs: (status, body, final url, headers). Audited; header values (keys, tokens) are never recorded."""
+def web_get(ctx, url, accept="application/json", headers=None, etag=None, what=None):
+    """GET one URL outside Google Cloud's APIs: (status, body, final url, headers). Audited; header values (keys, tokens) are never recorded.
+    what names the read on screen while it is in flight (default: host and path)."""
     h = {"User-Agent": UA, "Accept": accept}
     h.update(headers or {})
     if etag:
@@ -2707,7 +2809,7 @@ def web_get(ctx, url, accept="application/json", headers=None, etag=None):
     keyed = any(k.lower() == "authorization" for k in h)
     t0 = now()
     try:
-        with opener.open(urllib.request.Request(url, headers=h), timeout=WEB_TIMEOUT_S) as r:
+        with loading(what or f"{u.netloc}{u.path}"), opener.open(urllib.request.Request(url, headers=h), timeout=WEB_TIMEOUT_S) as r:
             body, st, final, rh = r.read(), r.status, r.geturl(), dict(r.headers)
     except urllib.error.HTTPError as e:
         try:
@@ -2830,7 +2932,7 @@ def read_page(ctx, s, url, refresh=False):
     cur = load_json(path, {})
     if cur.get("url") == url and from_cache(s, path, cur, DOCS_TTL_S, refresh):
         return cur
-    s.say(f"{urllib.parse.urlparse(url).netloc}: GET {url} (a published page; no account or key sent)")
+    fetch_line(s, f"{urllib.parse.urlparse(url).netloc}: GET {url} (a published page; no account or key sent)")
     final, hops = url, 0
     while True:
         try:
@@ -3806,14 +3908,15 @@ def annotate_catalog(cat, f):
 
 
 def from_cache(s, path, cur, ttl, refresh):
-    """Say whether a cached copy is used (which file, how old, when it is read again) or Google is asked; True when the cache is used."""
+    """Say whether a cached copy is used (which file, how old, when it is read again) or its source (Google, NVIDIA, GitHub) is read
+    again; True when the cache is used."""
     if not refresh and cur.get("fetched") and now() - cur["fetched"] < ttl:
-        s.say(f"from the cache file {short_path(path)}, read from Google {human_dur(now() - cur['fetched'])} ago "
+        s.say(f"from the cache file {short_path(path)}, read from its source {human_dur(now() - cur['fetched'])} ago "
               f"(read again after {human_dur(ttl)}, or now with --refresh)")
         return True
-    s.say((f"the cached copy {short_path(path)} could not be read; asking Google" if os.path.exists(path) else "no cached copy")
-          if not cur.get("fetched") else ("--refresh asks Google again" if refresh else
-                                                           f"the cached copy is {human_dur(now() - cur['fetched'])} old, past {human_dur(ttl)}: asking Google again"))
+    s.say((f"the cached copy {short_path(path)} could not be read; reading its source" if os.path.exists(path) else "no cached copy; reading its source")
+          if not cur.get("fetched") else ("--refresh reads its source again" if refresh else
+                                          f"the cached copy is {human_dur(now() - cur['fetched'])} old, past {human_dur(ttl)}: reading its source again"))
     return False
 
 
@@ -4387,10 +4490,26 @@ def calendar_search(ctx, shape, region, count, start_after_s, start_before_s, mi
 
 # ------------------------------------------------------------------ NVIDIA workloads on Google Cloud
 class AuditOnly:
-    """A step-like sink for background reads (a link being checked): what it says goes to the audit log, not the screen."""
+    """A step-like sink for background reads (a link being checked): what it says goes to the audit log; a read that goes over the
+    network is shown on screen as well, so a slow one is never unseen, unless the caller shows its own progress (fetches=False)."""
+
+    def __init__(self, fetches=True):
+        self.fetches = fetches
 
     def say(self, msg, style=None, always=False):
         audit("read", msg=msg)
+
+    def fetch(self, msg):
+        rep = getattr(AUDIT[0], "report", None) if AUDIT[0] else None
+        if self.fetches and rep is not None:
+            rep.say(msg)
+        else:
+            audit("read", msg=msg)
+
+
+def fetch_line(s, text):
+    """Say a network read: on screen for a step, and for a background sink too unless it shows its own progress."""
+    (getattr(s, "fetch", None) or s.say)(text)
 
 
 def doc_link(ctx, key):
@@ -4661,7 +4780,7 @@ def model_details(ctx, repos, s):
         return cur["info"]
     tried, repo, d = [], None, None
     for cand in repos:
-        s.say(f"huggingface.co, public metadata, no account or token sent: GET /api/models/{cand}?blobs=true")
+        fetch_line(s, f"huggingface.co, public metadata, no account or token sent: GET /api/models/{cand}?blobs=true")
         try:
             st, body = hf_get(ctx, f"/api/models/{cand}", {"blobs": "true"})
         except OSError as e:
@@ -4685,7 +4804,7 @@ def model_details(ctx, repos, s):
     info["precision"] = model_precision(repo, (st_.get("parameters") or {}).keys())
     if not size:
         info["errors"].append(f"{repo} lists no weight files")
-    s.say(f"huggingface.co: GET /{repo}/resolve/main/config.json (layers)")
+    fetch_line(s, f"huggingface.co: GET /{repo}/resolve/main/config.json (layers)")
     try:
         st, cfg = hf_get(ctx, f"/{repo}/resolve/main/config.json")
         if st != 200 or not cfg:
@@ -4904,12 +5023,14 @@ def ngc_search(ctx, s, rtype, query, refresh=False):
     cur = load_json(path, {})
     if from_cache(s, path, cur, DOCS_TTL_S, refresh):
         return cur["data"], cur["read"]
-    s.say(f"NGC catalog, public search, no key sent: {NGC_API}/search/catalog/resources/{rtype} for {query or 'everything'!r}")
+    fetch_line(s, f"NGC catalog, public search, no key sent: {NGC_API}/search/catalog/resources/{rtype} for {query or 'everything'!r}")
     out, page, total = {}, 0, None
     while True:
         q = json.dumps({"query": query, "page": page, "pageSize": 100})
         try:
-            st, body, _, _ = web_get(ctx, f"{NGC_API}/search/catalog/resources/{rtype}?" + urllib.parse.urlencode({"q": q}))
+            st, body, _, _ = web_get(ctx, f"{NGC_API}/search/catalog/resources/{rtype}?" + urllib.parse.urlencode({"q": q}),
+                                     what=f"{urllib.parse.urlparse(NGC_API).netloc} catalog search for {rtype.lower()}s, page {page + 1}"
+                                          + (f" of {total}" if total else "") + (f", {len(out):,} read so far" if out else ""))
         except OSError as e:
             raise PageError(f"{NGC_API}/search/catalog/resources/{rtype}", f"unreachable ({type(e).__name__})")
         if st != 200:
@@ -5193,7 +5314,7 @@ def nim_doc_profiles(ctx, s, rid, refresh=False):
         return [], "NVIDIA's NIM support matrix is found through the NIM's NGC record, which needs an NGC key (GPUF_NGC_API_KEY)"
     org, team, name = rid.split("/")
     url = f"{NGC_API}/org/{org}/team/{team}/repos/{name}"
-    s.say(f"NGC catalog, with the NGC key from {where} (its value is never recorded): GET {url} for the NIM's documentation")
+    fetch_line(s, f"NGC catalog, with the NGC key from {where} (its value is never recorded): GET {url} for the NIM's documentation")
     try:
         st, body, _, _ = web_get(ctx, url, headers={"Authorization": "Bearer " + key})
     except OSError as e:
@@ -5223,7 +5344,7 @@ def nim_profiles(ctx, s, rid, refresh=False):
     if cur.get("v") == 2 and from_cache(s, path, cur, DOCS_TTL_S, refresh):
         return cur["profiles"], cur["source"]
     url = f"{NGC_API}/nim/metadata?" + urllib.parse.urlencode({"resourceId": rid, "tag": NIM_TAG})
-    s.say(f"NVIDIA NIM Metadata API, open, no key sent: GET {url}")
+    fetch_line(s, f"NVIDIA NIM Metadata API, open, no key sent: GET {url}")
     try:
         st, body, _, _ = web_get(ctx, url)
     except OSError as e:
@@ -5261,7 +5382,7 @@ def nim_card_minimum(ctx, s, rid):
         return None
     _, team, name = rid.split("/")
     url = f"{NGC_API}/org/nim/team/{team}/models/{name}"
-    s.say(f"NGC catalog, with the NGC key from {where} (its value is never recorded): GET {url}")
+    fetch_line(s, f"NGC catalog, with the NGC key from {where} (its value is never recorded): GET {url}")
     try:
         st, body, _, _ = web_get(ctx, url, headers={"Authorization": "Bearer " + key})
     except OSError:
@@ -5421,6 +5542,8 @@ def github_get(ctx, s, path, refresh=False):
     hdr = {"Accept": "application/vnd.github+json"}
     if tok:
         hdr["Authorization"] = "Bearer " + tok
+    fetch_line(s, f"GitHub API{' with your token (never recorded)' if tok else ', no token sent'}: GET {path}"
+                  + (f" (checking whether the copy read {cur.get('read')} changed)" if cur.get("etag") else ""))
     try:
         st, body, _, rh = web_get(ctx, GITHUB_API + path, headers=hdr, etag=cur.get("etag"))
     except OSError as e:
@@ -5511,9 +5634,10 @@ def tree_items(paths, scope, nvidia_scope, dirs=()):
     return out
 
 
-def repo_items(ctx, s, owner, repo, scope, kind, meta=None):
+def repo_items(ctx, s, owner, repo, scope, kind, meta=None, tag=""):
     """Items from one GitHub repository, each with its Google Cloud paths, the GPUs its manifests request and the NIMs they run.
-    meta is the repository record when an organization listing already returned it (one API call fewer)."""
+    meta is the repository record when an organization listing already returned it (one API call fewer); tag is its place in a
+    longer listing, shown on its progress line."""
     meta = meta or github_get(ctx, s, f"/repos/{owner}/{repo}")
     if meta.get("archived"):
         return []
@@ -5524,16 +5648,20 @@ def repo_items(ctx, s, owner, repo, scope, kind, meta=None):
     truncated = bool(tree.get("truncated"))
     nvidia_scope = bool(re.search(SAMPLE_PATH_RX, f"{repo}/{scope}", re.I)) or kind == "blueprint"
     found = tree_items(blobs + dirs, scope, nvidia_scope, set(dirs)) if (scope or kind != "blueprint") else [""]
-    items = []
-    for path in found:
+    items, nread = [], 0
+    for k, path in enumerate(found, 1):
         inside = [b for b in blobs if not path or b == path or b.startswith(path + "/")]
         gcp_paths = sorted({b for b in inside if re.search(GCP_PATH_RX, b, re.I)})
         gcp = is_gcp_source(owner, repo, scope) or bool(gcp_paths)
         files = sorted((b for b in inside if re.search(MANIFEST_RX, b, re.I)), key=lambda b: (not re.search(GCP_PATH_RX, b, re.I), b))
         mans, notes = [], (["GitHub returned only part of this repository's file tree; some paths are not seen"] if truncated else [])
+        if len(found) > 1 and files:
+            s.say(f"{owner}/{repo}, sample {k} of {len(found)}: {path}, reading {min(len(files), MANIFEST_MAX_FILES)} deployment file(s) "
+                  f"from {urllib.parse.urlparse(GITHUB_RAW).netloc}")
         for b in files[:MANIFEST_MAX_FILES]:
             try:
                 f = manifest_facts(github_raw(ctx, owner, repo, ref, b))
+                nread += 1
             except (PageError, OSError) as e:
                 notes.append(f"{b}: {getattr(e, 'why', e)}")
                 continue
@@ -5547,6 +5675,8 @@ def repo_items(ctx, s, owner, repo, scope, kind, meta=None):
                       "url": meta.get("html_url", f"https://github.com/{owner}/{repo}") + (f"/{'blob' if is_file else 'tree'}/{ref}/{path}" if path else ""),
                       "gcp": gcp, "gcp_paths": gcp_paths[:8], "nims": sorted({n for m in mans for n in m["nims"]}), "nim_names": [],
                       "manifests": mans, "notes": notes, "desc": meta.get("description") or ""})
+    s.say(f"{owner}/{repo}{tag}: {len(blobs)} files in its tree, {plural(len(items), 'item')}, {nread} deployment file(s) read"
+          + (f", {sum(1 for i in items if i['gcp'])} with a Google Cloud path" if kind == "blueprint" else ""))
     return items
 
 
@@ -5572,10 +5702,18 @@ def catalog_items(ctx, s, refresh=False):
     give is listed with the reason. An item removed or archived at its source is gone on the next read."""
     path = ctx.cache_path("catalog-items-" + hashlib.sha256(CATALOG_SOURCES.encode()).hexdigest()[:12])
     cur = load_json(path, {})
-    if from_cache(s, path, cur, DOCS_TTL_S, refresh):
+    if cur.get("errors") and not refresh:
+        # an incomplete read is never reused as the catalog; the parts that were read are cached on their own and cost nothing again
+        s.say(f"the catalog read {cur.get('read')} was incomplete ({len(cur['errors'])} source(s) not read); reading its sources again", "y")
+    elif from_cache(s, path, cur, DOCS_TTL_S, refresh):
         return cur["items"], cur["errors"], cur["read"]
     items, errors, archived = [], [], set()
     nims = None
+
+    def failed(what, why):
+        errors.append(f"{what}: {why}")
+        s.say(f"{what}: not read, {why}", "y")
+
     for spec in csv_list(CATALOG_SOURCES):
         typ, _, rest = spec.partition(":")
         try:
@@ -5598,31 +5736,38 @@ def catalog_items(ctx, s, refresh=False):
                     if len(batch) < 100:
                         break
                     page += 1
+                live = []
                 for r in repos:
                     if r.get("archived") or r.get("disabled"):
                         archived.add(f"{rest}/{r['name']}".lower())
-                        continue
+                    else:
+                        live.append(r)
+                s.say(f"{rest}: {len(repos)} public repositories, {len(live)} not archived; reading each one's file tree")
+                for k, r in enumerate(live, 1):
                     try:
-                        items += repo_items(ctx, s, rest, r["name"], "", "blueprint", meta=r)
+                        items += repo_items(ctx, s, rest, r["name"], "", "blueprint", meta=r, tag=f" ({k} of {len(live)})")
                     except PageError as e:
-                        errors.append(f"{rest}/{r['name']}: {e.why}")
+                        failed(f"{rest}/{r['name']}", e.why)
                         if "rate limit" in e.why:
+                            if k < len(live):
+                                failed(f"{rest}, the other {len(live) - k} repositories", "not tried while GitHub's rate limit is spent")
                             break
             elif typ == "github":
                 ownrepo, _, scope = rest.partition(":")
                 owner, repo = ownrepo.split("/", 1)
-                s.say(f"GitHub API: {owner}/{repo}" + (f", under {scope}" if scope else "") + ", file tree and manifests")
+                s.say(f"GitHub API: {owner}/{repo}" + (f", under {scope}" if scope else "") + ", file tree and deployment files")
                 items += repo_items(ctx, s, owner, repo, scope, "sample")
             else:
-                errors.append(f"{spec}: unknown source type (ngc:TYPE, github-org:ORG or github:OWNER/REPO[:PATH])")
+                failed(spec, "unknown source type (ngc:TYPE, github-org:ORG or github:OWNER/REPO[:PATH])")
         except PageError as e:
-            errors.append(f"{spec}: {e.why}")
+            failed(spec, e.why)
     # an NGC blueprint and its GitHub repository are one item: the repository its NVIDIA page links to most, else the same name
     ngc = [i for i in items if i["key"].startswith("ngc:")]
     if ngc:
         s.say(f"NVIDIA's blueprint pages ({urllib.parse.urlparse(BLUEPRINT_PAGE).netloc}): the source repository each one links to, "
               f"{len(ngc)} pages, {CATALOG_THREADS} at a time")
-        quiet = AuditOnly()
+        # the pages are read in parallel; each one is reported as it comes back, so none of them waits unseen
+        quiet = AuditOnly(fetches=False)
         orgs = [r.partition(":")[2].lower() for r in csv_list(CATALOG_SOURCES) if r.startswith("github-org:")]
 
         def link_of(i):
@@ -5632,10 +5777,14 @@ def catalog_items(ctx, s, refresh=False):
                 return i, None, e.why
 
         with concurrent.futures.ThreadPoolExecutor(max(1, CATALOG_THREADS)) as ex:
-            for i, repo, why in ex.map(link_of, ngc):
+            futs = [ex.submit(link_of, i) for i in ngc]
+            for k, fut in enumerate(concurrent.futures.as_completed(futs), 1):
+                i, repo, why = fut.result()
                 i["repo_key"] = repo
                 if why:
                     i["notes"].append(f"its NVIDIA page could not be read ({why}); matched to GitHub by name only")
+                s.say(f"({k} of {len(ngc)}) {i['url']}: " + (f"page unreadable, {why}" if why else
+                                                             f"source repository {repo}" if repo else "links no repository of its own"))
     orgs_read = {r.partition(":")[2].lower() for r in csv_list(CATALOG_SOURCES) if r.startswith("github-org:")}
     by_repo = {i["key"][3:].lower(): i for i in items if i["key"].startswith("gh:") and i["kind"] == "blueprint"}
     by_slug = {i["name"].lower(): i for i in items if i["key"].startswith("gh:") and i["kind"] == "blueprint"}
@@ -5664,7 +5813,7 @@ def catalog_items(ctx, s, refresh=False):
         try:
             nims, _ = nim_list(ctx, s, refresh)
         except PageError as e:
-            errors.append(f"NIM list: {e.why}")
+            failed("NIM list", e.why)
     # NGC's blueprint attributes write a NIM's dots as underscores (llama-3_3-70b-instruct for llama-3.3-70b-instruct)
     norm = lambda n: n.lower().replace("_", ".")  # noqa: E731
     by_name = {norm(n["id"].rsplit("/", 1)[-1]): n["id"] for n in nims or []}
@@ -8798,7 +8947,8 @@ def gcloud_works(gcloud, env_python=None):
     args = ["version", "--format=value(\"Google Cloud SDK\")"]
     t0 = now()
     try:
-        r = subprocess.run([gcloud] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GCLOUD_TIMEOUT_S, env=env)
+        with loading("gcloud version"):
+            r = subprocess.run([gcloud] + args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GCLOUD_TIMEOUT_S, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         audit("cmd", argv=gcloud_argv(gcloud, args), rc=None, ms=int((now() - t0) * 1000), withheld=str(e))
         return None, str(e)
@@ -10538,6 +10688,34 @@ class SelfTest(unittest.TestCase):
                          ({"serviceShareType": "ALLOW_ALL"}, "2", True))
         hunt.req = {"workload": {"target": "nim"}}
         self.assertNotIn("reservationSharingPolicy", Hunt.reservation_body(hunt, g96, 2, "gpuf-r1"))
+
+    def test_progress_lines(self):
+        # a quiet step says what is in flight and for how long; nothing is printed over a question or outside a step
+        t = Term(plain=True)
+        t.out = io.StringIO()
+        rep = Report(t, Events(None), "normal")
+        rep.beat_thread = False
+        self.assertEqual(call_what("GET", f"{COMPUTE}/projects/me/aggregated/machineTypes?x=1", "page 3", own="me"),
+                         "compute.googleapis.com GET /aggregated/machineTypes, page 3")
+        self.assertIn("/projects/ubuntu-os-cloud/global/images", call_what("GET", f"{COMPUTE}/projects/ubuntu-os-cloud/global/images", own="me"))
+        with rep.step("Reading prices", "test"):
+            with loading("cloudbilling.googleapis.com GET /services/x/skus, page 2"):
+                t.last_out = now() - PROGRESS_S - 1
+                rep.beat()
+                self.assertIn("reading cloudbilling.googleapis.com GET /services/x/skus, page 2", t.out.getvalue())
+                n = len(t.out.getvalue())
+                t.asking, t.last_out = True, now() - PROGRESS_S - 1
+                rep.beat()
+                self.assertEqual(len(t.out.getvalue()), n)
+                t.asking = False
+            self.assertEqual(in_flight(), [])
+            t.last_out = now() - PROGRESS_S - 1
+            rep.beat()
+            self.assertIn("still working on reading prices", t.out.getvalue())
+        n = len(t.out.getvalue())
+        t.last_out = now() - PROGRESS_S - 1
+        rep.beat()
+        self.assertEqual(len(t.out.getvalue()), n)
 
     def test_targets_and_verdict(self):
         ctx = _test_ctx()

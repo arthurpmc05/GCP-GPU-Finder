@@ -119,6 +119,8 @@ python3 gcp_gpu_finder.py            # the wizard asks everything, then holds th
 
 Every question has a default, a skip (`>`), a skip-all (`>>`), a back (`<`) and a flag, so the same run can be scripted. Ctrl-C stops new attempts, prints a summary and asks whether to keep or release what was obtained.
 
+Some first reads take time: Google's price list is tens of thousands of entries, and the NVIDIA catalog reads NGC, every blueprint page and dozens of GitHub repositories. Each read is named on screen before it is made, a step that reads many things reports each one as it finishes, and a step that has printed nothing for `GPUF_PROGRESS_S` seconds (default 5) says what it is still reading, for how long, and how far through a long list it is. A source that cannot be read is reported the moment it fails. Later runs reuse the cached reads and are quick.
+
 A sized, scripted example: size an NVIDIA model as a NIM on GKE at a given context length and peak concurrency, search a preferred region with the rest of its geography as fallback, hold the capacity as Spot VMs, and let the tool offer a quota request if quota turns out to be the limit.
 
 ```
