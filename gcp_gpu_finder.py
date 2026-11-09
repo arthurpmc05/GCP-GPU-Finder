@@ -17,12 +17,16 @@ WHAT IT DOES
   1. Checks your environment: gcloud sign-in, project, billing, enabled APIs, the IAM
      permissions each acquisition method needs, organization policies, networks, and the
      regions your project can use. Every problem comes with the exact command or link to fix it.
-  2. Asks what the GPUs will run: an NVIDIA model in Vertex AI Model Garden (read live from the
-     Agent Platform API, with the machine types Google tested), an NVIDIA product on Google Cloud
-     (Omniverse and Isaac Sim workstations, Kit App Streaming, BioNeMo, NIM, and NVIDIA's
-     Marketplace VM images read live), or nothing in particular. For a model it asks your longest
-     request and peak requests at once, then lists only the machine types that fit and recommends
-     the GPU total: model copies needed, VM instances needed, GPUs in total.
+  2. Asks what the GPUs will run and where: an NVIDIA model on a Vertex AI endpoint (only the
+     machine types Google tested for it in Model Garden, one copy per replica VM, plus the spare
+     VMs Google asks for), the same model as an NVIDIA NIM on GKE or a VM (sized by NVIDIA's NIM
+     profiles, the ones NVIDIA validated on that GPU first), an NVIDIA blueprint or a Google Cloud
+     sample (sized by the NIMs it runs and the GPUs its manifests request), an NVIDIA product such
+     as Isaac Sim or Omniverse Kit (NVIDIA's requirement floors and GPU rules), an NVIDIA
+     Marketplace VM image, or nothing in particular. Everything is read live, so a new release
+     appears and a withdrawn one disappears. For a model it asks your longest request and peak
+     requests at once, then lists only the machine types that fit and recommends the GPU total:
+     model copies needed, VM instances needed, GPUs in total, and what each row is sized by.
   3. Asks the rest: GPU model and total (the recommendation is the default), machine types,
      independent VMs or same-zone clusters, regions, how to hold the capacity, and for VMs the
      operating system from Google's current public images for that CPU, boot disk and network.
@@ -52,11 +56,16 @@ HOW IT HOLDS CAPACITY (you choose each run)
   vms           Standard on-demand VMs, created in bulk. Billed while they exist.
   spot          Spot VMs: much cheaper, but Google can reclaim them at any time.
   flex          Flex-start VMs (Dynamic Workload Scheduler): queued up to 2 hours per request,
-                run up to 7 days, discounted. A2, G2, G4 and N1 only.
+                run up to 7 days, discounted.
   flex-group    Flex-start group: a managed instance group resize request that creates all
                 VMs of a group at once, when all are available.
-  calendar      Calendar-mode future reservation for A4, A3 Ultra, A3 Mega, A3 High 8-GPU and
-                A3 Edge: reserve 1 to 90 days ahead, no quota needed, billed for the whole period.
+  calendar      Calendar-mode future reservation: reserve 1 to 90 days ahead, no quota needed,
+                billed for the whole period.
+  Which machine series offer each method is read from Google's consumption-option table
+  (GPUF_DOC_PAGES accel, columns named in GPUF_METHOD_COLUMNS); a method Google later refuses
+  for a machine type is remembered. For a Vertex AI endpoint only a reservation (created with
+  serviceShareType ALLOW_ALL, which Vertex AI needs) and calendar mode apply; a calendar
+  reservation is shared the same way once Google delivers it.
 
 WHAT IT NEVER DOES
   - It never installs software, signs in, enables an API or creates a network without asking
@@ -156,6 +165,8 @@ COMMANDS
   python3 gcp_gpu_finder.py status RUN_ID       what a run holds and requested
   python3 gcp_gpu_finder.py resume RUN_ID       continue a stopped run
   python3 gcp_gpu_finder.py release RUN_ID      delete what that run created (asks first)
+  python3 gcp_gpu_finder.py catalog             NVIDIA on Google Cloud, read live: Model Garden models,
+                                                NIMs, products, blueprints, samples, Marketplace images
   python3 gcp_gpu_finder.py self-test           offline checks of this file's logic
   python3 gcp_gpu_finder.py knobs               every tunable setting and its default
   python3 gcp_gpu_finder.py log [RUN_ID|PATH]   read an audit log back (--kinds, --last, --list)
@@ -229,26 +240,42 @@ FILES IT WRITES (default ~/.gcp_gpu_finder, change with GPUF_HOME)
   runs/<run id>/events.jsonl  the run's audit log: every step, check, call, file, command and
                               decision from the moment the run exists, rotated and gzipped
   runs/<run id>/summary.txt   the final summary
-  cache/                      catalog, Model Garden, Marketplace and OS image lists, prices and
-                              role lists, refreshed on a schedule
+  cache/                      catalog, Model Garden, NIM, blueprint, Marketplace and OS image lists,
+                              the published pages read, prices and role lists, refreshed on a schedule
 
-WHERE NVIDIA INFORMATION COMES FROM
-  Models        Vertex AI Model Garden, publisher GPUF_MODEL_GARDEN_PUBLISHER (default nvidia), through
-                the Agent Platform API: versions, and every machine type, GPU type, GPU count and
-                serving setting Google tested. Only those GPUs are offered for a model.
-  Requests per  estimated from the model's own published architecture and weight size (the
-  copy          repository Model Garden deploys, its MODEL_ID), at the cache format and memory share
-                Google's tested configuration sets, capped by its --max-num-seqs.
-  Products      NVIDIA's Marketplace VM images from image project GPUF_MARKETPLACE_IMAGE_PROJECT, read
-                live; Omniverse, Isaac Sim, Kit App Streaming, BioNeMo and NIM from Google's pages
-                about them (no Google API lists Marketplace products), each with its GPU rule.
-  Links         only Google pages about NVIDIA on Google Cloud: docs.cloud.google.com, Google Cloud
-                solutions, GKE AI Labs, Google codelabs and the Google Cloud blog.
+WHERE INFORMATION COMES FROM (nothing about GPUs, machines, models or products is built in)
+  Google        GPU memory, architecture and RTX vWS, machine series, holding methods per series,
+                N1 pairings, boot disk types, disk quota names, zone geographies, location value
+                groups and Vertex AI's spare-VM rule: the pages in GPUF_DOC_PAGES, read by their
+                table headers and cached for GPUF_DOCS_TTL_S. Prices: the Cloud Billing catalog.
+  Vertex AI     Model Garden, publisher GPUF_MODEL_GARDEN_PUBLISHER (default nvidia), through the
+                Agent Platform API: every machine type, GPU count and serving setting Google tested
+                (tensor, pipeline, data and expert parallelism, context, --max-num-seqs). Requests
+                per copy are estimated from the model's own published architecture and weights.
+  NIM           NVIDIA's NIM list from the NGC catalog search; each NIM's profiles from NVIDIA's NIM
+                Metadata API (open, no key): GPU, count, precision, memory floor, and the GPUs NVIDIA
+                validated each profile on. Where a NIM's metadata names no GPU or memory, NVIDIA's
+                NIM support matrix (found through the NIM's NGC record, which needs an NGC key).
+                With no network or no key, a dated snapshot of both built into this file
+                (GPUF_NIM_SNAPSHOT), refreshed from those sources at each release.
+  NGC key       GPUF_NGC_API_KEY or NGC_API_KEY, else the nvcr.io login enroot keeps, else a hidden
+                prompt; held in memory only, never shown, logged or cached. Optional.
+  Blueprints    NGC catalog blueprints, linked to their GitHub repository through NVIDIA's blueprint
+  and samples   page; samples from the GitHub sources in GPUF_CATALOG_SOURCES (NVIDIA's and Google's
+                repositories), with their Google Cloud paths, GPU requests and NIM images. GitHub
+                allows 60 unauthenticated calls an hour; GPUF_GITHUB_TOKEN raises that.
+  Products      NVIDIA's requirement pages in GPUF_PRODUCT_PAGES (RAM, cores, GPU memory, driver, and
+                GPU rules such as unsupported architectures or RT cores) and the Google Cloud page
+                each links to; NVIDIA's Marketplace VM images from GPUF_MARKETPLACE_IMAGE_PROJECT.
 
 NETWORK CALLS
   compute, cloudquotas, cloudbilling, cloudresourcemanager, serviceusage, iam and aiplatform
-  .googleapis.com; huggingface.co (a chosen model's published architecture only, no token); the
-  metadata server on GCE; dl.google.com (only when setup installs gcloud).
+  .googleapis.com; docs.cloud.google.com (Google's published tables); huggingface.co (a chosen
+  model's published architecture only, no token); api.ngc.nvidia.com (NIM list, NIM metadata,
+  blueprints; the NGC key only for a NIM's record and model card); docs.nvidia.com and NVIDIA's
+  product documentation sites; build.nvidia.com (blueprint pages); api.github.com and
+  raw.githubusercontent.com (blueprint and sample repositories); the metadata server on GCE;
+  dl.google.com (only when setup installs gcloud).
   HTTPS_PROXY and NO_PROXY are honored; a custom CA bundle goes in --ca-bundle or GPUF_CA_BUNDLE.
   With a person's sign-in, calls carry X-Goog-User-Project so APIs that need a quota project work;
   --no-user-project turns that off, --user-project forces it on.
@@ -274,11 +301,15 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import base64
+import concurrent.futures
 import contextlib
 import copy
 import datetime as dt
 import gzip
 import hashlib
+import html
+import html.parser
 import http.client
 import io
 import json
@@ -304,12 +335,13 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+import zlib
 
 if sys.version_info < (3, 9):
     sys.exit(f"Python {sys.version.split()[0]} is too old: this script needs Python 3.9 or newer "
              "(python.org/downloads, or your package manager's python3 package)")
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 UA = f"gcp-gpu-finder/{VERSION} (python {sys.version_info.major}.{sys.version_info.minor})"
 COMPUTE = "https://compute.googleapis.com/compute/v1"
 COMPUTE_BETA = "https://compute.googleapis.com/compute/beta"
@@ -388,7 +420,6 @@ EVENTS_ROTATE_MB = knob("EVENTS_ROTATE_MB", 50, "events log size that triggers g
 BOOT_DISK_GB = knob("BOOT_DISK_GB", 50, "boot disk size for VMs this tool creates")
 IMAGE = knob("IMAGE", "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64",
              "default boot image when set here; otherwise the operating system question defaults to an image with the NVIDIA driver installed")
-N1_VCPUS_PER_GPU = knob("N1_VCPUS_PER_GPU", 8, "vCPUs per attached GPU for N1 machines (T4, V100, P4, P100)")
 NAME_PREFIX = knob("NAME_PREFIX", "gpuf", "prefix of every resource name this tool creates")
 FLEX_WAIT_S = knob("FLEX_WAIT_S", 7200, "how long one flex-start request waits in its zone for capacity (GPUF_FLEX_WAIT_MIN_S to GPUF_FLEX_WAIT_MAX_S)")
 FLEX_WAIT_MIN_S = knob("FLEX_WAIT_MIN_S", 90, "shortest wait Google accepts for one flex-start request (its documented limit)")
@@ -414,10 +445,68 @@ FIT_KV_BYTES = knob("FIT_KV_BYTES", 2, "bytes per KV-cache element (2 for BF16);
 FIT_SSM_BYTES = knob("FIT_SSM_BYTES", 4, "bytes per Mamba state element (4 keeps the state in FP32)")
 FIT_CONTEXT = knob("FIT_CONTEXT", 32768, "default longest prompt plus answer per request, in tokens, when sizing a model")
 FIT_CONCURRENCY = knob("FIT_CONCURRENCY", 8, "default peak requests in flight across all copies when sizing a model")
-HF_TIMEOUT_S = knob("HF_TIMEOUT_S", 30, "socket deadline for reading a Model Garden model's published architecture")
 MODEL_GARDEN_LOCATION = knob("MODEL_GARDEN_LOCATION", "us-central1", "Agent Platform (Vertex AI) location whose endpoint lists Model Garden")
 MODEL_GARDEN_PUBLISHER = knob("MODEL_GARDEN_PUBLISHER", "nvidia", "Model Garden publisher whose models are offered")
-MARKETPLACE_IMAGE_PROJECT = knob("MARKETPLACE_IMAGE_PROJECT", "nvidia-ngc-public", "image project of NVIDIA's Google Cloud Marketplace VM products")
+MARKETPLACE_IMAGE_PROJECT = knob("MARKETPLACE_IMAGE_PROJECT", "nvidia-ngc-public", "image projects of NVIDIA's Google Cloud Marketplace VM products, "
+                                                                                  "comma separated")
+TARGET = knob("TARGET", "vertex", "where a model is deployed, which decides how it is sized: vertex (a Vertex AI endpoint from Model Garden, only the "
+                                  "configurations Google tested, one copy per VM) or nim (NVIDIA NIM on GKE or a VM, NVIDIA's published NIM profiles)")
+WEB_TIMEOUT_S = knob("WEB_TIMEOUT_S", 30, "socket deadline for one read of a published page or public catalog (Google and NVIDIA documentation, NGC, GitHub)")
+DOCS_TTL_S = knob("DOCS_TTL_S", 86400, "seconds a published page or public catalog read is reused before it is read again")
+DOC_PAGES = knob("DOC_PAGES", "accel=https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines,"
+                              "gpus=https://docs.cloud.google.com/compute/docs/gpus,"
+                              "pd_support=https://docs.cloud.google.com/compute/docs/disks/persistent-disks,"
+                              "gpu_zones=https://docs.cloud.google.com/compute/docs/regions-zones/gpu-regions-zones,"
+                              "value_groups=https://docs.cloud.google.com/organization-policy/restrict-locations,"
+                              "disk_quotas=https://docs.cloud.google.com/compute/resource-usage,"
+                              "vertex_reservations=https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/predictions/use-reservations,"
+                              "model_garden=https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-garden/explore-models,"
+                              "deploy_open=https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/open-models/deploy-model-garden,"
+                              "provisioning=https://docs.cloud.google.com/compute/docs/instances/provisioning-models,"
+                              "drivers=https://docs.cloud.google.com/compute/docs/gpus/install-drivers-gpu,"
+                              "os=https://docs.cloud.google.com/compute/docs/images/os-details,"
+                              "dlvm=https://docs.cloud.google.com/deep-learning-vm/docs/images,"
+                              "marketplace=https://docs.cloud.google.com/marketplace/docs/get-products,"
+                              "nim_profiles=https://docs.nvidia.com/nim/metadata-api/about/overview",
+                 "the published pages facts are read from and links point to, key=url; GPUF_DOC_PAGES replaces only the keys it names")
+PRODUCT_PAGES = knob("PRODUCT_PAGES", "https://docs.isaacsim.omniverse.nvidia.com/latest/installation/requirements.html,"
+                                      "https://docs.omniverse.nvidia.com/dev-guide/latest/common/technical-requirements.html",
+                     "NVIDIA requirement pages, comma separated; each names its product and NVIDIA's floor for RAM, cores, GPU memory, driver and GPU class")
+REQ_TIER_RX = knob("REQ_TIER_RX", r"\bminimum\b", "the column or heading of a requirement page whose values are NVIDIA's floor")
+GRAPHICS_RX = knob("GRAPHICS_RX", r"\bRTX\b", "a requirement page's GPU line matching this needs a GPU that runs NVIDIA RTX graphics (Google offers RTX vWS for it)")
+CLOUD_LINK_RX = knob("CLOUD_LINK_RX", r"google cloud|\bgcp\b", "links on a requirement page whose text matches this lead to NVIDIA's Google Cloud page for it")
+VCPU_PER_CORE = knob("VCPU_PER_CORE", 2, "vCPUs counted per physical core when NVIDIA states cores (Google: each x86 vCPU is one hardware thread)")
+BOOT_DISKS = knob("BOOT_DISKS", "pd-balanced,hyperdisk-balanced", "boot disk types this tool prefers, in order, among those Google's table allows")
+METHOD_COLUMNS = knob("METHOD_COLUMNS", "vms=On-demand,spot=Spot,flex=Flex-start,flex-group=Flex-start,reservation=On-demand reservations,"
+                                        "calendar=Future reservations in calendar mode",
+                      "which column of Google's consumption-option table decides each holding method, method=column")
+NGC_API = knob("NGC_API", "https://api.ngc.nvidia.com/v2", "NGC catalog, NIM Metadata API and NIM model card endpoint")
+NIM_TAG = knob("NIM_TAG", "latest", "NIM container tag whose published profiles are read")
+NIM_TEAMS = knob("NIM_TEAMS", "", "NIM publishers listed when a NIM is chosen, comma separated (e.g. nvidia,meta); empty lists every NIM with profiles")
+GITHUB_API = knob("GITHUB_API", "https://api.github.com", "GitHub API used for NVIDIA blueprints and Google Cloud samples")
+GITHUB_RAW = knob("GITHUB_RAW", "https://raw.githubusercontent.com", "where a repository file is read whole")
+CATALOG_SOURCES = knob("CATALOG_SOURCES", "ngc:BLUEPRINT,github-org:NVIDIA-AI-Blueprints,github:NVIDIA/nim-deploy:cloud-service-providers/google-cloud,"
+                                          "github:GoogleCloudPlatform/cloud-solutions:projects/nvidia-omniverse-on-google-cloud,"
+                                          "github:GoogleCloudPlatform/kubernetes-engine-samples,github:GoogleCloudPlatform/vertex-ai-samples:notebooks,"
+                                          "github:GoogleCloudPlatform/ai-on-gke,github:GoogleCloudPlatform/accelerated-platforms",
+                      "where NVIDIA blueprints and Google Cloud samples are read: ngc:TYPE, github-org:ORG, github:OWNER/REPO[:PATH], comma separated")
+SAMPLE_PATH_RX = knob("SAMPLE_PATH_RX", r"nvidia|(^|[-_/])nim([-_/.]|$)|nemotron|cosmos|omniverse|isaac|bionemo|triton|nemo([-_/.]|$)",
+                      "a path in a sample repository is an NVIDIA sample when a folder or file name matches this")
+GCP_PATH_RX = knob("GCP_PATH_RX", r"(^|/)(gke|gcp|google[-_]?cloud|vertex[-_]?ai|vertexai|cloud[-_]?run|gce)(/|[-_.]|$)",
+                   "a repository path that marks a Google Cloud deployment")
+MANIFEST_RX = knob("MANIFEST_RX", r"(values[^/]*\.ya?ml|\.tfvars|deployment[^/]*\.ya?ml|docker-compose[^/]*\.ya?ml|\.tf)$",
+                   "repository files read for GPU requests (nvidia.com/gpu, accelerator selectors, machine types)")
+SAMPLE_HOME_LEVELS = knob("SAMPLE_HOME_LEVELS", 2, "folders a sample may climb from an NVIDIA-named file or folder to the folder with its README")
+CATALOG_THREADS = knob("CATALOG_THREADS", 8, "NVIDIA blueprint pages read at the same time (each page is read once a day; GPUF_DOCS_TTL_S)")
+MANIFEST_MAX_FILES = knob("MANIFEST_MAX_FILES", 12, "most manifest files read per catalog item, Google Cloud paths first; more are listed as not read")
+MANIFEST_MAX_KB = knob("MANIFEST_MAX_KB", 512, "largest manifest file read, in KB")
+GCP_OWNERS = knob("GCP_OWNERS", "GoogleCloudPlatform", "GitHub owners whose repositories are Google Cloud deployments by definition, comma separated")
+BLUEPRINT_PAGE = knob("BLUEPRINT_PAGE", "https://build.nvidia.com/{publisher}/{name}", "address of an NGC blueprint's own page; checked when it is opened")
+VERTEX_SPARE_RX = knob("VERTEX_SPARE_RX", r"at least (\d+) additional VMs?\s*;?\s*we recommend (\d+)\s*%",
+                       "the sentence on Google's Vertex AI reservations page giving the spare VMs a deployment needs: (floor) and (percent)")
+NIM_SUPPORT_PAGE = knob("NIM_SUPPORT_PAGE", "support-matrix.html", "the page beside a NIM's NVIDIA documentation that states its GPUs and GPU memory")
+NIM_VALIDATED_FIRST = knob("NIM_VALIDATED_FIRST", True, "recommend a NIM profile NVIDIA validated on the GPU before one that only meets its memory floor")
+NIM_SNAPSHOT = knob("NIM_SNAPSHOT", "on", "on: when NVIDIA's NIM profiles cannot be read live, use the built-in snapshot and say so; off: never")
 IMAGE_PROJECTS = knob("IMAGE_PROJECTS", "deeplearning-platform-release,ubuntu-os-accelerator-images,rocky-linux-accelerator-cloud,cos-cloud,"
                       "ubuntu-os-cloud,debian-cloud,rocky-linux-cloud,rhel-cloud,windows-cloud",
                       "public image projects offered as VM operating systems, in this order")
@@ -571,7 +660,8 @@ def atomic_write(path, text, mode=0o600):
         audit("file", op="kept", path=path, bytes=len(text.encode("utf-8")), note="in memory only: this session saves nothing")
         return
     private_dir(os.path.dirname(path))
-    tmp = f"{path}.tmp.{os.getpid()}"
+    # one temporary name per process and thread: parallel reads may cache the same page at the same moment
+    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
     # the file is born with its final permissions, so no reader sees it more open than that even for an instant
     with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -948,6 +1038,8 @@ def format_record(t, rec, sym=(">", "+", "-"), body_chars=None):
             (t.s(f"   {rec['more']}", "gr") if rec.get("more") else "") + (t.s(f"   fix: {rec['fix']}", "gr") if rec.get("fix") and st != "ok" else "")
     if kind == "say":
         return rec.get("msg", "")
+    if kind == "read":
+        return t.s(f"{d} ", "gr") + t.s("read  ", "c") + t.s(rec.get("msg", ""), "gr")
     if kind == "answer":
         how = "  replayed after going back" if rec.get("replayed") else (f"  skipped by {rec['auto']}" if rec.get("auto") else "")
         return t.s("> " if rec.get("auto") else "? ", "c", "b") + f"{rec.get('q')}: " + t.s(rec.get("answer", ""), "c") + t.s(how, "gr")
@@ -1600,6 +1692,20 @@ class Prompter:
                 continue
             return self._accept(q, s, s == word)
 
+    def secret(self, q):
+        """A key typed without echo; it is never recorded, shown or replayed. Unattended runs and an empty answer give None."""
+        if not self.interactive:
+            return None
+        import getpass
+        self.t.dash_stop()
+        self._gap()
+        try:
+            v = getpass.getpass(f"{q}: ")
+        except (EOFError, KeyboardInterrupt):
+            v = ""
+        audit("answer", q=q, a="(hidden)" if v else "(none)")
+        return v.strip() or None
+
 
 # ------------------------------------------------------------------ sign-in
 class AuthError(Exception):
@@ -1863,7 +1969,7 @@ class Tokens:
 LEVELS = {"quiet": 0, "normal": 1, "detailed": 2, "trace": 3}
 # the least detail level at which each kind of audit record is kept and shown
 KIND_LEVEL = {"session": 1, "step": 1, "check": 1, "note": 1, "say": 1, "answer": 1, "nav": 1, "api": 2, "http": 2, "file": 2, "cmd": 2,
-              "attempt": 2, "body": 3}
+              "attempt": 2, "read": 2, "body": 3}
 # the session's audit log, so helpers without a context (file access, gcloud, downloads) still record what they do
 AUDIT = [None]
 
@@ -1898,6 +2004,7 @@ class Events:
         self.printer = None
         self.report = None
         self.broken = {}
+        self.lock = threading.Lock()
 
     @property
     def path(self):
@@ -1911,6 +2018,11 @@ class Events:
             self.write("session", msg=f"this audit trail is also written to {short_path(p)}")
 
     def write(self, kind, **fields):
+        # parallel page reads write here from several threads; one record at a time keeps lines whole and the count right
+        with self.lock:
+            self._write(kind, **fields)
+
+    def _write(self, kind, **fields):
         rec = {"ts": iso(), "t": round(now(), 3), "kind": kind}
         rec.update(fields)
         if self.printer:
@@ -2548,52 +2660,565 @@ class RunLock:
             self.fh = None
 
 
-# ------------------------------------------------------------------ hardware facts the API does not report
-# GPU memory for accelerators whose catalog description omits it (NVIDIA product specifications); the API
-# description gives it for the rest, for example "NVIDIA H100 80GB" or "NVIDIA B200 180GB".
-GPU_MEMORY_GB = {"nvidia-rtx-pro-6000": 96, "nvidia-l4": 24, "nvidia-tesla-t4": 16, "nvidia-tesla-v100": 16,
-                 "nvidia-tesla-p4": 8, "nvidia-tesla-p100": 16}
-# NVIDIA architecture by accelerator name fragment, shown beside each GPU in the GPU list.
-GPU_ARCH = [("rtx-pro-6000", "Blackwell"), ("gb300", "Blackwell"), ("gb200", "Blackwell"), ("b200", "Blackwell"), ("vr200", "Rubin"),
-            ("h200", "Hopper"), ("h100", "Hopper"), ("l4", "Ada"), ("a100", "Ampere"), ("v100", "Volta"), ("t4", "Turing"),
-            ("p100", "Pascal"), ("p4", "Pascal")]
-# Boot disk type each machine family accepts (Compute Engine machine series docs); its regional storage quota.
-BOOT_DISK = {"g4": "hyperdisk-balanced", "a3": "hyperdisk-balanced", "a4": "hyperdisk-balanced", "a4x": "hyperdisk-balanced",
-             "a5x": "hyperdisk-balanced", "g2": "pd-balanced", "a2": "pd-balanced", "n1": "pd-balanced"}
-DISK_QUOTA = {"hyperdisk-balanced": "HDB-TOTAL-GB-per-project-region", "pd-balanced": "SSD-TOTAL-GB-per-project-region"}
-# Which holding methods Google offers for which machines (docs: GPU machine types, on-demand reservations,
-# flex-start VMs, calendar-mode future reservations). Google's own answer at create time still decides.
+# ------------------------------------------------------------------ published pages: what Google and NVIDIA state, read live
+# No hardware fact, method rule or region group is built into this file. Each comes from a page or catalog named in a GPUF_ knob,
+# read at run time and cached for GPUF_DOCS_TTL_S, and is shown with where it came from. When a page cannot be read, or no longer
+# has the table expected, the value is unknown and the tool says so instead of assuming one.
 METHODS = ["reservation", "vms", "spot", "flex", "flex-group", "calendar"]
 METHOD_LABEL = {"reservation": "on-demand reservation", "vms": "on-demand VMs", "spot": "Spot VMs", "flex": "flex-start VMs",
                 "flex-group": "flex-start group (all at once)", "calendar": "calendar-mode future reservation"}
-CALENDAR_TYPES = ("a4-highgpu-8g", "a3-ultragpu-8g", "a3-megagpu-8g", "a3-highgpu-8g", "a3-edgegpu-8g")
-FLEX_FAMILIES = ("a2", "g2", "g4", "n1")
+# what the run has read from published pages, for helpers that are called without a context; refreshed by load_facts()
+PUBLISHED = {"facts": {}, "value_groups": None, "refused": {}}
+
+
+class PageError(Exception):
+    def __init__(self, url, why):
+        super().__init__(f"{url}: {why}")
+        self.url, self.why = url, why
+
+
+def kv_list(text):
+    """'key=value,key=value' as a dict; a value may hold '=' but not ','."""
+    out = {}
+    for part in csv_list(text):
+        k, sep, v = part.partition("=")
+        if sep and k.strip():
+            out[k.strip()] = v.strip()
+    return out
+
+
+def doc_url(key):
+    """A published page by key: GPUF_DOC_PAGES's documented default, with any key the environment names replacing it."""
+    pages = kv_list(KNOBS["DOC_PAGES"][1])
+    pages.update(kv_list(KNOBS["DOC_PAGES"][0]))
+    return pages.get(key)
+
+
+def web_get(ctx, url, accept="application/json", headers=None, etag=None):
+    """GET one URL outside Google Cloud's APIs: (status, body, final url, headers). Audited; header values (keys, tokens) are never recorded."""
+    h = {"User-Agent": UA, "Accept": accept}
+    h.update(headers or {})
+    if etag:
+        h["If-None-Match"] = etag
+    ca = ((getattr(ctx, "opts", None) or {}).get("ca_bundle")) or os.environ.get("GPUF_CA_BUNDLE") or None
+    sslctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=sslctx))
+    u = urllib.parse.urlparse(url)
+    keyed = any(k.lower() == "authorization" for k in h)
+    t0 = now()
+    try:
+        with opener.open(urllib.request.Request(url, headers=h), timeout=WEB_TIMEOUT_S) as r:
+            body, st, final, rh = r.read(), r.status, r.geturl(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read() or b""
+        except OSError:
+            body = b""
+        st, final, rh = e.code, url, dict(e.headers or {})
+    except OSError as e:
+        audit("http", m="GET", host=u.netloc, path=u.path, status=0, ms=int((now() - t0) * 1000), bytes=0, note=f"{type(e).__name__}: {e}")
+        raise
+    audit("http", m="GET", host=u.netloc, path=u.path, query=u.query, status=st, ms=int((now() - t0) * 1000), bytes=len(body),
+          note="a key was sent; its value is not recorded" if keyed else "public read, no account or key sent")
+    return st, body, final, rh
+
+
+class PageParser(html.parser.HTMLParser):
+    """A page's title, site name, tables (each with the heading above it), links and blocks of text."""
+    BLOCKS = {"p", "li", "dd", "dt", "pre", "blockquote", "figcaption", "td", "th", "caption"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title, self.site, self.refresh, self.last_head = "", "", None, ""
+        self.heads, self.level = {}, None
+        self.tables, self.links, self.blocks = [], [], []
+        self.skip, self.depth, self.in_title = 0, 0, False
+        self.table = self.row = self.cell = self.head = self.anchor = None
+        self.buf = []
+
+    def flush(self):
+        text = re.sub(r"\s+", " ", "".join(self.buf)).strip()
+        if text:
+            self.blocks.append(text)
+        self.buf = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag in ("script", "style", "noscript", "svg"):
+            self.skip += 1
+        elif tag == "title":
+            self.in_title = True
+        elif tag == "meta":
+            if (a.get("property") or a.get("name") or "").lower() == "og:site_name":
+                self.site = a.get("content") or ""
+            if (a.get("http-equiv") or "").lower() == "refresh":
+                m = re.search(r"url\s*=\s*(.+)$", a.get("content") or "", re.I)
+                self.refresh = m.group(1).strip("'\" ") if m else None
+        elif re.fullmatch(r"h[1-6]", tag):
+            self.flush()
+            self.head, self.level = [], int(tag[1])
+        elif tag == "table":
+            self.flush()
+            self.depth += 1
+            if self.depth == 1:
+                self.table = {"head": self.last_head, "path": " / ".join(self.heads[k] for k in sorted(self.heads)), "rows": []}
+        elif tag == "tr" and self.depth == 1:
+            self.row = []
+        elif tag in ("td", "th") and self.row is not None:
+            self.cell = []
+        elif tag == "br":
+            self.buf.append(" ")
+            if self.cell is not None:
+                self.cell.append(" ")
+        elif tag == "a":
+            self.anchor = (a.get("href") or "", [])
+        elif tag in self.BLOCKS:
+            self.flush()
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "svg"):
+            self.skip = max(0, self.skip - 1)
+        elif tag == "title":
+            self.in_title = False
+        elif re.fullmatch(r"h[1-6]", tag) and self.head is not None:
+            self.last_head = re.sub(r"\s+", " ", "".join(self.head)).strip().rstrip("#").strip()
+            self.heads = {k: v for k, v in self.heads.items() if k < self.level}
+            self.heads[self.level] = self.last_head
+            self.head = None
+            self.flush()
+        elif tag in ("td", "th") and self.cell is not None and self.row is not None:
+            self.row.append(re.sub(r"\s+", " ", "".join(self.cell)).strip())
+            self.cell = None
+        elif tag == "tr" and self.row is not None and self.table is not None:
+            if self.row:
+                self.table["rows"].append(self.row)
+            self.row = None
+        elif tag == "table" and self.depth:
+            self.depth -= 1
+            if self.depth == 0 and self.table is not None:
+                if self.table["rows"]:
+                    self.tables.append(self.table)
+                self.table = None
+            self.flush()
+        elif tag == "a" and self.anchor is not None:
+            href, parts = self.anchor
+            self.links.append({"href": href, "text": re.sub(r"\s+", " ", "".join(parts)).strip()})
+            self.anchor = None
+        if tag in self.BLOCKS:
+            self.flush()
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        if self.in_title:
+            self.title += data
+            return
+        self.buf.append(data)
+        if self.head is not None:
+            self.head.append(data)
+        if self.cell is not None:
+            self.cell.append(data)
+        if self.anchor is not None:
+            self.anchor[1].append(data)
+
+
+def read_page(ctx, s, url, refresh=False):
+    """A published page as title, tables, links and text, read live and cached; PageError when it cannot be read."""
+    if not url:
+        raise PageError("(no address)", "no page is configured for this in GPUF_DOC_PAGES")
+    path = ctx.cache_path("page-" + hashlib.sha256(url.encode()).hexdigest()[:20])
+    cur = load_json(path, {})
+    if cur.get("url") == url and from_cache(s, path, cur, DOCS_TTL_S, refresh):
+        return cur
+    s.say(f"{urllib.parse.urlparse(url).netloc}: GET {url} (a published page; no account or key sent)")
+    final, hops = url, 0
+    while True:
+        try:
+            st, body, final, _ = web_get(ctx, final, accept="text/html,application/xhtml+xml")
+        except OSError as e:
+            raise PageError(url, f"unreachable ({type(e).__name__}: {e})")
+        if st != 200:
+            raise PageError(url, f"HTTP {st}")
+        p = PageParser()
+        p.feed(body.decode("utf-8", "replace"))
+        p.flush()
+        if p.refresh and hops < 3 and not p.tables:
+            final = urllib.parse.urljoin(final, p.refresh)
+            hops += 1
+            continue
+        break
+    title = re.sub(r"\s+", " ", p.title).strip()
+    rec = {"fetched": now(), "read": iso(), "url": url, "final": final, "title": title, "site": p.site or (re.split(r"\s+[|\u2014-]\s+", title)[-1] if title else ""),
+           "tables": p.tables, "links": [dict(x, href=urllib.parse.urljoin(final, x["href"])) for x in p.links if x["href"]], "blocks": p.blocks}
+    atomic_json(path, rec, 0o644)
+    s.say(f"{len(p.tables)} tables, {len(p.blocks)} text blocks; " + saved_where(path))
+    return rec
+
+
+def page_title(ctx, key):
+    """A configured page's own title, from the cache when it was read before; the address alone otherwise."""
+    url = doc_url(key)
+    if not url:
+        return None, None
+    cur = load_json(ctx.cache_path("page-" + hashlib.sha256(url.encode()).hexdigest()[:20]), {}) if ctx else {}
+    title = re.split(r"\s+[|\u2014]\s+", cur.get("title") or "")[0].strip() if cur.get("title") else None
+    return title or key.replace("_", " "), cur.get("final") or url
+
+
+def hcol(header, *words):
+    """The index of the first header cell that holds every word (case-insensitive), or None."""
+    for i, h in enumerate(header):
+        if all(w.lower() in h.lower() for w in words):
+            return i
+    return None
+
+
+def first_num(text):
+    """The first number in a cell: '1,440' gives 1440, '1/8' gives 0.125, '16 to 32' gives 16."""
+    m = re.search(r"(\d[\d,]*(?:\.\d+)?)(?:\s*/\s*(\d+))?", text or "")
+    if not m:
+        return None
+    v = float(m.group(1).replace(",", ""))
+    return v / int(m.group(2)) if m.group(2) else v
+
+
+def last_num(text):
+    """The last number in a cell: '1 to 48' gives 48."""
+    nums = re.findall(r"\d[\d,]*(?:\.\d+)?", text or "")
+    return float(nums[-1].replace(",", "")) if nums else None
+
+
+def series_of(heading):
+    """The machine series a Google table heading names: 'A3 Ultra machine type (NVIDIA H200)' and 'Supported disk types for A4 instances'
+    give 'A3 Ultra' and 'A4'."""
+    h = (heading or "").strip()
+    m = re.search(r"\bfor (.+?) instances\b", h, re.I) or re.match(r"^(.+?)\s+machine\s+(types?|series)\b", h, re.I)
+    return (m.group(1) if m else re.sub(r"\s*\(.*$", "", h)).strip()
+
+
+def name_tokens(text):
+    """Letter runs and digit runs of a product name, without 'nvidia' and without an aside that names no memory size."""
+    text = re.sub(r"\((?![^)]*\d+\s*GB)[^)]*\)", " ", text or "", flags=re.I)
+    return [t for t in re.findall(r"[a-z]+|\d+", text.lower()) if t != "nvidia"]
+
+
+def split_memory(tokens):
+    """(model tokens, memory in GB) from name tokens: ['h', '100', '80', 'gb'] gives (['h', '100'], 80)."""
+    out, mem, i = [], None, 0
+    while i < len(tokens):
+        if tokens[i].isdigit() and i + 1 < len(tokens) and tokens[i + 1] == "gb":
+            mem = int(tokens[i])
+            i += 2
+            continue
+        out.append(tokens[i])
+        i += 1
+    return out, mem
+
+
+def gpu_fact(label, facts=None):
+    """Google's published row for a GPU (memory, architecture, RTX vWS), matched to a Compute Engine accelerator label by name."""
+    facts = facts if facts is not None else PUBLISHED["facts"]
+    mine, mem = split_memory(name_tokens(label))
+    best, best_score = None, -1
+    for g in (facts or {}).get("gpus") or []:
+        theirs, tmem = split_memory(name_tokens(g["model"]))
+        if not theirs or not set(theirs) <= set(mine):
+            continue
+        if {t for t in theirs if t.isdigit()} != {t for t in mine if t.isdigit()}:
+            continue
+        gmem = tmem or g.get("mem_gb")
+        if mem and gmem and int(mem) != int(gmem):
+            continue
+        score = len(theirs) + (2 if tmem and mem else 0)
+        if score > best_score:
+            best, best_score = g, score
+    return best
+
+
+def qualifier_ok(q, gpus):
+    if not q:
+        return True
+    op, n = q
+    return {"less": gpus < n, "more": gpus > n, "least": gpus >= n, "eq": gpus == n}[op]
+
+
+def consumption_row(shape, facts=None):
+    """The row of Google's consumption-option table that covers a machine type, or None when the table names no row for it."""
+    facts = facts if facts is not None else PUBLISHED["facts"]
+    base = shape.get("base") or shape["name"]
+    series = (facts or {}).get("series") or {}
+    for row in (facts or {}).get("consumption") or []:
+        for name in row["series"]:
+            hit = any(base in machines for s, machines in series.items() if s == name or s.startswith(name + " "))
+            if not hit:
+                toks = name.lower().split()
+                hit = base.startswith(toks[0] + "-" + (toks[1] if len(toks) > 1 else ""))
+            if hit and qualifier_ok(row.get("qualifier"), shape["gpus"]):
+                return row
+    return None
+
+
+def method_columns():
+    return kv_list(METHOD_COLUMNS)
+
+
+def shape_methods(shape, facts=None):
+    """Per holding method: True or False from Google's consumption-option table, None when the table has no row or column for it."""
+    row = consumption_row(shape, facts)
+    out = {}
+    for m in METHODS:
+        col = method_columns().get(m)
+        v = (row or {}).get("cols", {}).get(col) if col else None
+        out[m] = None if v is None else bool(v)
+    return out, (row or {}).get("label")
 
 
 def method_allows(method, shape):
-    """Whether Google offers a holding method for a machine shape, with the reason when it does not."""
-    name, fam = shape["name"], shape["family"]
-    base = shape.get("base") or name
-    if method == "calendar":
-        return (base in CALENDAR_TYPES, "calendar mode covers A4, A3 Ultra, A3 Mega, A3 High 8-GPU and A3 Edge only")
-    if method == "flex":
-        return (fam in FLEX_FAMILIES, "standalone flex-start VMs cover A2, G2, G4 and N1; use flex-group for A3 and A4")
-    if method in ("reservation", "vms"):
-        if fam in ("a4", "a4x", "a5x") or base.startswith("a3-ultragpu"):
-            return (False, "Google offers this machine through spot, flex-start, calendar mode or committed capacity only")
-        if re.fullmatch(r"a3-highgpu-[124]g", base):
-            return (False, "a3-highgpu-1g, -2g and -4g run only as Spot or flex-start VMs")
-        if shape.get("fraction", 1.0) < 1.0 and method == "reservation":
-            return (True, "")
-        return (True, "")
-    return (True, "")
+    """Whether Google offers a holding method for a machine shape, with the reason when it does not: Google's own refusal on an
+    earlier attempt, then Google's consumption-option table. A machine the table does not cover is left to Google's answer."""
+    base = shape.get("base") or shape["name"]
+    refused = PUBLISHED["refused"].get(f"{method}|{base}")
+    if refused:
+        return False, f"Google refused {METHOD_LABEL[method]} for {base} on {refused['at'][:10]}: {refused['why']}"
+    v = (shape.get("methods") or {}).get(method)
+    if v is False:
+        return False, (f"Google's consumption-option table says {shape.get('methods_row') or base}: no {method_columns().get(method)} "
+                       f"({doc_url('accel')})")
+    return True, ""
 
 
-def accel_arch(accel):
-    for frag, arch in GPU_ARCH:
-        if frag in (accel or ""):
-            return arch
-    return None
+def disk_types_for(headers, disk_types):
+    """Compute Engine disk types a row of Google's disk-support table allows, from its column names and the disk types' own names."""
+    out = []
+    for h in headers:
+        hl = h.lower()
+        if hl.startswith("all disk"):
+            out += list(disk_types)
+        elif hl.startswith("all hyperdisk"):
+            out += [n for n, d in disk_types.items() if d.lower().startswith("hyperdisk")]
+        else:
+            out += [n for n, d in disk_types.items() if d.lower() == hl or d.lower().startswith(hl + " ") or hl.startswith(d.lower())]
+    return [n for i, n in enumerate(out) if n not in out[:i]]
+
+
+def boot_disk_for(shape, facts, disk_types):
+    """The boot disk type for a machine type: the first of GPUF_BOOT_DISKS that Google's disk-support table allows for it, else None."""
+    base = shape.get("base") or shape["name"]
+    disks = (facts or {}).get("disks") or {}
+    headers = disks.get(base)
+    if headers is None:
+        # a variant such as a3-ultragpu-8g-nolssd follows the machine type it is named after
+        stem = max((m for m in disks if base.startswith(m)), key=len, default=None)
+        headers = disks.get(stem) if stem else None
+    if headers is None:
+        for s, machines in ((facts or {}).get("series") or {}).items():
+            if base in machines:
+                kin = [disks[m] for m in machines if m in disks]
+                headers = kin[0] if kin else None
+                break
+    if headers is None and shape.get("attached"):
+        headers = disks.get(shape["family"].upper() + "+GPU") or disks.get(shape["family"].upper())
+    if headers is None:
+        return None
+    allowed = disk_types_for(headers, disk_types)
+    return next((d for d in csv_list(BOOT_DISKS) if d in allowed), None)
+
+
+def parse_consumption(table):
+    """Google's consumption-option table: one row per machine series, with a yes or no per column."""
+    hdr, rows = table["rows"][0], []
+    for r in table["rows"][1:]:
+        if not r:
+            continue
+        label = r[0]
+        core = re.sub(r"\s*\([^)]*\)", "", label).strip()
+        q = None
+        m = re.search(r"\bwith\s+(less than|fewer than|more than|at least)?\s*(\d+)\s+GPUs?\b", core, re.I)
+        if m:
+            q = ({"less than": "less", "fewer than": "less", "more than": "more", "at least": "least"}.get((m.group(1) or "").lower(), "eq"),
+                 int(m.group(2)))
+        core = re.sub(r"\s+with\b.*$", "", core, flags=re.I)
+        series = [x.strip() for x in re.split(r"\s+and\s+|,\s*", core) if x.strip()]
+        cols = {h: (v.strip().lower().startswith("yes")) for h, v in zip(hdr[1:], r[1:]) if v.strip()}
+        rows.append({"label": label, "series": series, "qualifier": q, "cols": cols})
+    return rows
+
+
+def google_facts(ctx, s, refresh=False):
+    """What Google publishes about its GPU machines, read from the pages in GPUF_DOC_PAGES: per GPU model (memory, architecture,
+    RTX vWS), per machine series (machine types, disk types), which holding methods each offers, N1 GPU pairings and zone locations."""
+    pages, errors = {}, []
+    for key in ("accel", "gpus", "pd_support", "gpu_zones"):
+        url = doc_url(key)
+        if not url:
+            continue
+        try:
+            pages[key] = read_page(ctx, s, url, refresh)
+        except PageError as e:
+            errors.append(f"{key}: {e.why} ({url})")
+    return parse_facts(pages, errors)
+
+
+def parse_facts(pages, errors=()):
+    """Google's GPU facts from its pages' tables, found by their column names rather than their position on the page."""
+    f = {"read": iso(), "sources": {}, "errors": list(errors), "gpus": [], "series": {}, "disks": {}, "consumption": [], "n1": {}, "geo": {}}
+    want = set(method_columns().values())
+    for key in ("accel", "gpus"):
+        page = pages.get(key)
+        if not page:
+            continue
+        f["sources"][key] = {"url": page.get("final"), "title": page.get("title"), "read": page.get("read")}
+        for t in page["tables"]:
+            hdr = t["rows"][0]
+            body = t["rows"][1:]
+            if hcol(hdr, "gpu model") is not None and hcol(hdr, "architecture") is not None:
+                ci = {k: hcol(hdr, *w) for k, w in (("model", ("gpu model",)), ("series", ("series",)), ("arch", ("architecture",)),
+                                                    ("mem", ("memory",)), ("ic", ("interconnect",)), ("vws", ("vws",)), ("per", ("per",)))}
+                for r in body:
+                    g = {k: (r[i] if i is not None and i < len(r) else None) for k, i in ci.items()}
+                    f["gpus"].append({"model": g["model"], "series": g["series"], "arch": g["arch"], "mem_gb": first_num(g["mem"]), "mem_text": g["mem"],
+                                      "interconnect": g["ic"], "vws": None if g["vws"] is None else g["vws"].lower().startswith("yes"),
+                                      "per_vm": g["per"], "source": key})
+            elif want and all(hcol(hdr, w) is not None for w in want):
+                f["consumption"] = parse_consumption(t)
+            elif hdr and re.match(r"machine (type|series)", hdr[0], re.I) and any(re.search(r"hyperdisk|all disks|persistent", h, re.I) for h in hdr[1:]):
+                for r in body:
+                    if not r:
+                        continue
+                    # a row names one machine type (g4-standard-48) or a whole series (N1)
+                    key = r[0] if re.match(r"[a-z]\d", r[0]) else r[0].split()[0].upper()
+                    f["disks"][key] = [h for h, v in zip(hdr[1:], r[1:]) if v and v.strip().upper() not in ("N/A", "NO") and first_num(v) != 0]
+            elif hdr and hdr[0].lower().startswith("machine type") and hcol(hdr, "gpu count") is not None:
+                f["series"].setdefault(series_of(t["head"]), set()).update(r[0] for r in body if r and re.match(r"[a-z]\d", r[0]))
+            elif hdr and hdr[0].lower().startswith("accelerator type") and hcol(hdr, "vcpu") is not None:
+                ci, cv, cm = hcol(hdr, "gpu count"), hcol(hdr, "vcpu"), hcol(hdr, "instance memory")
+                for r in body:
+                    for acc in re.findall(r"nvidia-[a-z0-9-]+", r[0]):
+                        if acc.endswith("-vws") or ci is None:
+                            continue
+                        n = first_num(r[ci])
+                        if n:
+                            f["n1"].setdefault(acc, {})[int(n)] = {"vcpus": last_num(r[cv]), "mem_gb": last_num(r[cm]) if cm is not None else None}
+    f["series"] = {k: sorted(v) for k, v in f["series"].items()}
+    page = pages.get("pd_support")
+    if page:
+        f["sources"]["pd_support"] = {"url": page.get("final"), "title": page.get("title"), "read": page.get("read")}
+        for t in page["tables"]:
+            hdr = t["rows"][0]
+            pd_cols = [i for i, h in enumerate(hdr) if re.search(r"\bPD\b", h)]
+            if not hdr or not hdr[0].lower().startswith("machine series") or not pd_cols:
+                continue
+            for r in t["rows"][1:]:
+                if not r:
+                    continue
+                # a check mark is an icon with no text; Google marks what a series does not support with a dash
+                ok = [re.sub(r"\bPD\b", "Persistent Disk", hdr[i]) for i in pd_cols if i < len(r) and r[i].strip() not in ("\u2014", "-", "No", "N/A")]
+                key = r[0].replace(" ", "").upper()
+                if key not in f["disks"]:
+                    f["disks"][key] = ok
+    page = pages.get("gpu_zones")
+    if page:
+        f["sources"]["gpu_zones"] = {"url": page.get("final"), "title": page.get("title"), "read": page.get("read")}
+        for t in page["tables"]:
+            hdr = t["rows"][0]
+            cz, cl = hcol(hdr, "zone"), hcol(hdr, "location")
+            if cz is None or cl is None:
+                continue
+            for r in t["rows"][1:]:
+                if len(r) > max(cz, cl) and re.match(r"[a-z]+-[a-z]+\d+-[a-z]$", r[cz]):
+                    label = r[cl].rsplit(",", 1)[-1].strip()
+                    f["geo"][r[cz].rsplit("-", 1)[0]] = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+    # Google's prose names each card in full beside its accelerator id: "RTX PRO 6000 Blackwell Server Edition GPUs (nvidia-rtx-pro-6000"
+    f["gpu_names"] = {}
+    for key in ("accel", "gpus"):
+        for b in (pages.get(key) or {}).get("blocks") or []:
+            for m in re.finditer(r"((?:NVIDIA )?[A-Z0-9][A-Za-z0-9]*(?: [A-Za-z0-9]+){0,6}) GPUs? \((nvidia-[a-z0-9-]+)", b):
+                f["gpu_names"].setdefault(m.group(2), [])
+                if m.group(1) not in f["gpu_names"][m.group(2)]:
+                    f["gpu_names"][m.group(2)].append(m.group(1))
+    for what, ok in (("GPU model table", f["gpus"]), ("consumption-option table", f["consumption"]), ("disk-support tables", f["disks"]),
+                     ("N1 GPU tables", f["n1"]), ("zone locations", f["geo"])):
+        if not ok and not any(e.startswith(("accel", "gpus", "gpu_zones")) for e in f["errors"]):
+            f["errors"].append(f"no {what} found on the configured pages; the page may have changed shape")
+    return f
+
+
+def load_facts(ctx, s, refresh=False):
+    """Read (or reuse) Google's published GPU facts for this run and keep them where every helper can see them."""
+    f = google_facts(ctx, s, refresh)
+    PUBLISHED["facts"] = f
+    PUBLISHED["refused"] = load_json(ctx.cache_path("refused"), {}) or {}
+    return f
+
+
+def learn_refusal(ctx, method, shape, why):
+    """Remember Google's own refusal of a holding method for a machine type, so it is not offered again; kept with the caches."""
+    key = f"{method}|{shape.get('base') or shape['name']}"
+    PUBLISHED["refused"][key] = {"at": iso(), "why": why[:300]}
+    atomic_json(ctx.cache_path("refused"), PUBLISHED["refused"], 0o644)
+
+
+def disk_quota_for(ctx, disk_type, s=None):
+    """The regional capacity quota a boot disk type draws on, from Google's disk quota page: the quota whose description names the
+    disk type (by its Compute Engine display name); None when the page cannot be read or names none."""
+    cache = PUBLISHED.setdefault("disk_quota", {})
+    if disk_type in cache:
+        return cache[disk_type]
+    desc = ((ctx.catalog or {}).get("disk_types") or {}).get(disk_type) or disk_type
+    names = [desc] + ([re.sub(r"\s+Persistent Disk$", "", desc)] if desc.lower().startswith("hyperdisk") else [])
+    try:
+        page = read_page(ctx, s or AuditOnly(), doc_url("disk_quotas"))
+    except PageError as e:
+        ctx.rep.say(f"disk quota page unreadable ({e.why}); the boot disk quota is left out of the quota panel", "y")
+        cache[disk_type] = None
+        return None
+    text = " ".join(page["blocks"])
+    marks = list(re.finditer(r"referred to as ([A-Z0-9-]+)", text))
+    found = None
+    for i, m in enumerate(marks):
+        if not m.group(1).endswith("TOTAL-GB"):
+            continue
+        window = text[(marks[i - 1].end() if i else 0):(marks[i + 1].start() if i + 1 < len(marks) else len(text))]
+        if any(re.search(rf"\b{re.escape(n)}\b", window, re.I) for n in names):
+            found = m.group(1) + "-per-project-region"
+            break
+    cache[disk_type] = found
+    return found
+
+
+def value_groups(ctx, s):
+    """Google's resourceLocations value groups (in:asia-locations and the rest) and the regions each holds, from its published table."""
+    if PUBLISHED["value_groups"] is not None:
+        return PUBLISHED["value_groups"]
+    direct, groups = {}, {}
+    try:
+        page = read_page(ctx, s, doc_url("value_groups"))
+        for t in page["tables"]:
+            hdr = t["rows"][0]
+            cd, cm = hcol(hdr, "details"), hcol(hdr, "member")
+            if cd is None or cm is None:
+                continue
+            for r in t["rows"][1:]:
+                m = re.search(r"in:([a-z0-9-]+)-locations", r[cd]) if len(r) > cd else None
+                if not m or len(r) <= cm:
+                    continue
+                g = m.group(1)
+                groups[g] = re.findall(r"([a-z0-9-]+)-locations", r[cm].split("Values:")[0])
+                direct[g] = set(re.findall(r"\b([a-z]+-[a-z]+\d+)\b(?!-)", r[cm].split("Values:", 1)[1])) if "Values:" in r[cm] else set()
+    except PageError as e:
+        s.say(f"value groups unreadable: {e.why}; a policy that names a group is checked by Google at create time", "y")
+        PUBLISHED["value_groups"] = {}
+        return {}
+
+    def expand(g, seen):
+        out = set(direct.get(g) or set())
+        for sub in groups.get(g) or []:
+            if sub not in seen:
+                out |= expand(sub, seen | {sub})
+        return out
+
+    PUBLISHED["value_groups"] = {g: expand(g, {g}) for g in direct}
+    return PUBLISHED["value_groups"]
 
 
 def accel_cores(accel):
@@ -2607,19 +3232,17 @@ def accel_cores(accel):
 
 
 # ------------------------------------------------------------------ regions
-GEO = [("asia-pacific", ("asia-", "australia-")), ("europe", ("europe-",)), ("north-america", ("us-", "northamerica-")),
-       ("south-america", ("southamerica-",)), ("middle-east", ("me-",)), ("africa", ("africa-",))]
-
-
 def geo_of(region):
-    for name, prefixes in GEO:
-        if region.startswith(prefixes):
-            return name
-    return "other"
+    """The geography Google's GPU locations page gives a region (apac, europe, north-america and so on), or 'other'."""
+    return ((PUBLISHED["facts"] or {}).get("geo") or {}).get(region) or "other"
+
+
+def geo_names():
+    return sorted(set(((PUBLISHED["facts"] or {}).get("geo") or {}).values()))
 
 
 def expand_regions(spec, known):
-    """Turn names, geographic groups (asia-pacific), prefixes (asia, us, europe) or 'all' into known region names, in order."""
+    """Turn names, Google's geographies (apac, europe), prefixes (asia, us, europe) or 'all' into known region names, in order."""
     out = []
     for raw in spec or []:
         item = raw.strip().lower()
@@ -2627,14 +3250,15 @@ def expand_regions(spec, known):
             continue
         if item == "all":
             hits = sorted(known)
-        elif item in dict(GEO):
+        elif item in geo_names():
             hits = sorted(r for r in known if geo_of(r) == item)
         elif item in known:
             hits = [item]
         else:
             hits = sorted(r for r in known if r.startswith(item + "-") or r.startswith(item))
         if not hits:
-            raise SystemExit(f"region or group {raw!r} matches no region this project can see")
+            raise SystemExit(f"region or group {raw!r} matches no region this project can see"
+                             + (f" (groups from Google's GPU locations page: {', '.join(geo_names())})" if geo_names() else ""))
         out += [h for h in hits if h not in out]
     return out
 
@@ -2703,8 +3327,6 @@ APIS = [("compute.googleapis.com", True, "everything"), ("cloudquotas.googleapis
         ("iam.googleapis.com", False, "role suggestions"), ("serviceusage.googleapis.com", False, "the API check itself"),
         ("aiplatform.googleapis.com", False, "NVIDIA models in Vertex AI Model Garden")]
 ORG_CONSTRAINTS = ["gcp.resourceLocations", "compute.requireShieldedVm", "compute.trustedImageProjects", "compute.restrictNonCmekServices"]
-LOCATION_GROUPS = {"us": "us", "eu": "europe", "europe": "europe", "asia": "asia", "northamerica": "northamerica", "southamerica": "southamerica",
-                   "australia": "australia", "me": "me", "africa": "africa"}
 
 
 class Check:
@@ -2801,10 +3423,9 @@ def location_allowed(region, policy):
             g = v[: -len("-locations")]
             if g == region:
                 return True
-            pref = LOCATION_GROUPS.get(g)
-            if pref:
-                return region.startswith(pref + "-")
-            return None
+            # Google's published value groups say which regions a group holds; unread, the answer is unknown
+            members = (PUBLISHED["value_groups"] or {}).get(g)
+            return None if members is None else region in members
         return v == region or v.startswith(region + "-")
 
     denied = [match(v) for v in lp.get("deniedValues") or []]
@@ -3024,6 +3645,8 @@ def org_policy_notes(ctx, regions):
         vals = (lp.get("allowedValues") or []) + [f"not {v}" for v in lp.get("deniedValues") or []]
         out.append(Check("policy resourceLocations", "warn", "resources may only go to: " + (", ".join(vals[:8]) or "nowhere (all denied)"),
                          "regions outside the policy are dropped from plans"))
+        if any(v.endswith("-locations") for v in (lp.get("allowedValues") or []) + (lp.get("deniedValues") or [])):
+            value_groups(ctx, ctx.rep)
         ctx.blocked_regions = {r for r in (regions or []) if location_allowed(r, loc) is False}
     else:
         out.append(Check("policy resourceLocations", "ok", "no location restriction" + absent_note(loc)))
@@ -3076,6 +3699,7 @@ def fetch_catalog(ctx):
     accs = api.aggregated("acceleratorTypes", params={"fields": "items/*/acceleratorTypes(name,description,maximumCardsPerInstance,zone),nextPageToken"})
     n1 = api.aggregated("machineTypes", params={"filter": 'name eq "n1-standard-[0-9]+"',
                                                 "fields": "items/*/machineTypes(name,guestCpus,memoryMb,zone,architecture),nextPageToken"})
+    dts = api.aggregated("diskTypes", params={"fields": "items/*/diskTypes(name,description),nextPageToken"})
     accel = {}
     # Google publishes a "-vws" accelerator type for each GPU that runs NVIDIA RTX Virtual Workstation (graphics) software
     vws = {a["name"][:-4] for items in accs.values() for a in items if a["name"].endswith("-vws")}
@@ -3089,9 +3713,6 @@ def fetch_catalog(ctx):
                                                "zones": set()})
             rec["zones"].add(zone)
     for a in accel.values():
-        m = re.search(r"(\d+)\s*GB", a["label"], re.I)
-        a["mem_gb"] = float(m.group(1)) if m else GPU_MEMORY_GB.get(a["name"])
-        a["arch"] = accel_arch(a["name"])
         a["label"] = a["label"].replace("_", " ").strip()
         a["vws"] = a["name"] in vws
     shapes = {}
@@ -3111,40 +3732,77 @@ def fetch_catalog(ctx):
                                                "gpus": acc.get("guestAcceleratorCount") or 1, "fraction": frac, "attached": False,
                                                "desc": x.get("description", ""), "cpu_arch": x.get("architecture"), "zones": set()})
             s["zones"].add(zone)
-    bundled = {s["accel"] for s in shapes.values()}
-    n1spec, n1zones = {}, {}
+    n1spec = {}
     for zone, items in n1.items():
         if zone not in up:
             continue
         for x in items:
-            n1spec[x["name"]] = (x["guestCpus"], round(x["memoryMb"] / 1024, 1), x.get("architecture"))
-            n1zones.setdefault(x["name"], set()).add(zone)
+            rec = n1spec.setdefault(x["name"], {"vcpus": x["guestCpus"], "mem_gib": round(x["memoryMb"] / 1024, 1), "arch": x.get("architecture"),
+                                                "zones": set()})
+            rec["zones"].add(zone)
+    disk_types = {d["name"]: d.get("description") or d["name"] for items in dts.values() for d in items}
+    for s in shapes.values():
+        s["zones"] = sorted(s["zones"])
+    for a in accel.values():
+        a["zones"] = sorted(a["zones"])
+    for r in n1spec.values():
+        r["zones"] = sorted(r["zones"])
+    return {"accels": accel, "shapes": shapes, "n1": n1spec, "disk_types": disk_types, "regions": regions, "zones": sorted(up), "fetched": now()}
+
+
+def annotate_catalog(cat, f):
+    """Add what Google publishes to the live catalog: GPU memory and architecture, which N1 machine types pair with which GPU,
+    each machine type's boot disk and the holding methods it offers. Unknowns stay unknown."""
+    accel, shapes = cat["accels"], {k: v for k, v in cat["shapes"].items() if not v.get("attached")}
+    notes = []
+    for a in accel.values():
+        g = gpu_fact(a["label"], f)
+        m = re.search(r"(\d+)\s*GB", a["label"], re.I)
+        a["mem_gb"] = float(m.group(1)) if m else (g or {}).get("mem_gb")
+        a["arch"] = (g or {}).get("arch")
+        a["fact"] = (g or {}).get("model")
+        if not a["mem_gb"]:
+            notes.append(f"{a['label']}: GPU memory unknown (no row on Google's GPU model table matches it)")
+    bundled = {s["accel"] for s in shapes.values()}
     for name, a in accel.items():
         if name in bundled:
             continue
-        count = 1
-        while count <= a["max_per_vm"]:
-            base = f"n1-standard-{N1_VCPUS_PER_GPU * count}"
-            zs = a["zones"] & n1zones.get(base, set())
-            if base in n1spec and zs:
-                sname = f"{base}+{name}x{count}"
-                shapes[sname] = {"name": sname, "base": base, "family": "n1", "vcpus": n1spec[base][0], "mem_gib": n1spec[base][1], "accel": name,
-                                 "gpus": count, "fraction": 1.0, "attached": True, "desc": f"N1 with {count} attached {a['label']}",
-                                 "cpu_arch": n1spec[base][2], "zones": zs}
-            count *= 2
+        pairs = (f.get("n1") or {}).get(name) or {}
+        if not pairs:
+            notes.append(f"{a['label']}: Google's N1 GPU tables name no machine pairing, so no N1 machine type is offered for it")
+        for count, lim in sorted(pairs.items()):
+            for base, spec in (cat.get("n1") or {}).items():
+                if lim.get("vcpus") and spec["vcpus"] > lim["vcpus"] or lim.get("mem_gb") and spec["mem_gib"] * 1.073741824 > lim["mem_gb"] + 1e-6:
+                    continue
+                zs = sorted(set(a["zones"]) & set(spec["zones"]))
+                if zs:
+                    sname = f"{base}+{name}x{count}"
+                    shapes[sname] = {"name": sname, "base": base, "family": "n1", "vcpus": spec["vcpus"], "mem_gib": spec["mem_gib"], "accel": name,
+                                     "gpus": int(count), "fraction": 1.0, "attached": True, "desc": f"N1 with {count} attached {a['label']}",
+                                     "cpu_arch": spec["arch"], "zones": zs}
     for s in shapes.values():
         a = accel.get(s["accel"]) or {}
         s["gpu_equiv"] = round(s["gpus"] * s["fraction"], 4)
         s["gpu_mem_gb"] = (a.get("mem_gb") or 0) * s["gpus"] * s["fraction"] if a.get("mem_gb") else None
-        s["zones"] = sorted(s["zones"])
         s["regions"] = sorted({region_of(z) for z in s["zones"]})
-        s["boot_disk"] = BOOT_DISK.get(s["family"], "pd-balanced")
+        s["boot_disk"] = boot_disk_for(s, f, cat.get("disk_types") or {})
+        s["methods"], s["methods_row"] = shape_methods(s, f)
     for a in accel.values():
-        a["zones"] = sorted(a["zones"])
         a["regions"] = sorted({region_of(z) for z in a["zones"]})
         a["shapes"] = sorted((s["name"] for s in shapes.values() if s["accel"] == a["name"]),
                              key=lambda n: (shapes[n]["gpu_equiv"], shapes[n]["vcpus"]))
-    return {"accels": accel, "shapes": shapes, "regions": regions, "zones": sorted(up), "fetched": now()}
+    nodisk = sorted({s["family"] for s in shapes.values() if not s["boot_disk"]})
+    if nodisk:
+        notes.append(f"no boot disk type for {', '.join(nodisk)}: Google's disk-support tables do not cover them, so VM methods refuse them")
+    norow = sorted({s["base"] for s in shapes.values() if s["methods_row"] is None and not s.get("attached")} |
+                   {"n1" for s in shapes.values() if s["methods_row"] is None and s.get("attached")})
+    if norow:
+        notes.append(f"Google's consumption-option table has no row for {', '.join(norow[:6])}{' and more' if len(norow) > 6 else ''}; "
+                     f"Google's answer at create time decides which holding methods they take")
+    cat["shapes"] = shapes
+    cat["notes"] = notes + list(f.get("errors") or [])
+    cat["facts_read"] = f.get("read")
+    return cat
 
 
 def from_cache(s, path, cur, ttl, refresh):
@@ -3160,18 +3818,29 @@ def from_cache(s, path, cur, ttl, refresh):
 
 
 def catalog(ctx, refresh=False):
-    path = ctx.cache_path("catalog-v2")
+    path = ctx.cache_path("catalog-v3")
     with ctx.rep.step("Reading the GPU catalog", "which NVIDIA GPUs and machine types exist, and in which zones this project can use them") as s:
         cur = load_json(path, {})
         if from_cache(s, path, cur, CATALOG_TTL_S, refresh):
-            ctx.catalog = cur
+            raw = cur
         else:
-            s.say("Compute Engine API: zones.list, machineTypes.aggregatedList for the A, G and N1 series, acceleratorTypes.aggregatedList")
-            ctx.catalog = fetch_catalog(ctx)
-            atomic_json(path, ctx.catalog, 0o644)
+            s.say("Compute Engine API: zones.list, machineTypes.aggregatedList for the A, G and N1 series, acceleratorTypes.aggregatedList, "
+                  "diskTypes.aggregatedList")
+            raw = fetch_catalog(ctx)
+            atomic_json(path, raw, 0o644)
             s.say(saved_where(path))
-        c = ctx.catalog
-        s.result(f"{len(c['accels'])} NVIDIA GPU types, {len(c['shapes'])} machine types, {len(c['zones'])} zones in {len(c['regions'])} regions")
+        c = raw
+        s.result(f"{len(c['accels'])} NVIDIA GPU types, {len(c['shapes'])} A and G machine types, {len(c['zones'])} zones in {len(c['regions'])} regions")
+    with ctx.rep.step("Reading what Google publishes about these GPUs",
+                      "GPU memory, architecture and RTX vWS, N1 pairings, disk types and holding methods per machine type, and zone locations, "
+                      "from the pages in GPUF_DOC_PAGES") as s:
+        f = load_facts(ctx, s, refresh)
+        ctx.catalog = annotate_catalog(copy.deepcopy(raw), f)
+        for n in ctx.catalog["notes"]:
+            s.say(n, "y")
+        s.result(f"{len(f['gpus'])} GPU models, {len(f['consumption'])} consumption rows, {len(f['disks'])} disk-support rows, "
+                 f"{sum(len(v) for v in f['n1'].values())} N1 pairings, {len(set(f['geo'].values()))} geographies; "
+                 f"{len(ctx.catalog['shapes'])} machine types in all", "y" if f["errors"] else "g")
     return ctx.catalog
 
 
@@ -3188,6 +3857,9 @@ class QuotaBook:
         self.usage = {}
         self.fetched = 0
         self.families = set()
+        self.vinfos = {}
+        self.vusage = {}
+        self.verror = None
 
     @staticmethod
     def parse_infos(rows):
@@ -3288,9 +3960,35 @@ class QuotaBook:
         self.fetched = now()
         return self
 
+    def load_vertex(self, ctx, regions):
+        """Vertex AI serving quotas from Cloud Quotas, and the GPUs already deployed on Vertex AI endpoints in each region (each
+        deployed model counted at its minimum replicas, the part that always runs)."""
+        try:
+            rows = list(ctx.api.pages(f"{QUOTAS}/projects/{ctx.project}/locations/global/services/aiplatform.googleapis.com/quotaInfos", "quotaInfos",
+                                      {"pageSize": 1000}))
+            self.vinfos = self.parse_infos(rows)
+            self.verror = None
+        except ApiError as e:
+            self.vinfos, self.verror = {}, classify(e, ctx.project)
+        self.vusage = {}
+        for r in regions:
+            try:
+                for ep in ctx.api.pages(f"https://{r}-aiplatform.googleapis.com/v1/projects/{ctx.project}/locations/{r}/endpoints", "endpoints",
+                                        {"pageSize": 100}):
+                    for dm in ep.get("deployedModels") or []:
+                        dr = dm.get("dedicatedResources") or {}
+                        spec = dr.get("machineSpec") or {}
+                        if not spec.get("acceleratorType"):
+                            continue
+                        key = (r, vertex_accel(spec["acceleratorType"]), "p" if dr.get("spot") else "s")
+                        self.vusage[key] = self.vusage.get(key, 0) + int(spec.get("acceleratorCount") or 0) * int(dr.get("minReplicaCount") or 1)
+            except ApiError as e:
+                self.vusage[(r, "_error")] = classify(e, ctx.project).title
+        return self
+
     def limit(self, qid, dims):
         """The enforced limit for a quota and dimensions: Cloud Quotas first, Compute's view second; -1 unlimited; None unknown."""
-        q = self.infos.get(qid)
+        q = self.infos.get(qid) or self.vinfos.get(qid)
         if q:
             best, best_n = None, -1
             for v in q["values"]:
@@ -3317,7 +4015,7 @@ class QuotaBook:
         if kind == "cpu_all":
             v = self.caps.get("CPUS_ALL_REGIONS")
             return int(v[1]) if v else None
-        if kind in ("cpu", "pcpu", "a2cpu", "ssd"):
+        if kind in ("cpu", "pcpu", "famcpu", "ssd"):
             metric = legacy_metric(layer["qid"])
             v = (self.legacy.get(layer["dims"]["region"]) or {}).get(metric)
             return int(v[1]) if v else None
@@ -3329,10 +4027,15 @@ class QuotaBook:
             return int(self.usage.get(("gpu", layer["dims"]["region"], layer["accel"], "p" if layer.get("pre") else "s"), 0))
         if kind == "disk":
             return int(self.usage.get(("disk", layer["dims"]["region"], layer["disk_type"]), 0))
+        if kind == "vertex_gpu":
+            r = layer["dims"]["region"]
+            if (r, "_error") in self.vusage:
+                return None
+            return int(self.vusage.get((r, layer["accel"], "p" if layer.get("pre") else "s"), 0))
         return None
 
     def info(self, qid):
-        return self.infos.get(qid) or {}
+        return self.infos.get(qid) or self.vinfos.get(qid) or {}
 
 
 def legacy_metric(qid):
@@ -3341,6 +4044,23 @@ def legacy_metric(qid):
         return None
     core = re.sub(r"-per-project(-region|-zone)?$", "", qid)
     return core.replace("-", "_")
+
+
+def vertex_quota_for(ctx, accel, region, pre=False):
+    """The Vertex AI serving quota for a GPU, found among aiplatform.googleapis.com's quotas by its metric
+    (custom_model_serving_nvidia_h100_gpus for nvidia-h100-80gb), never by a typed quota id."""
+    book = ctx.book
+    if not book or not book.vinfos:
+        return None
+    for core in accel_cores(accel):
+        metric = "custom_model_serving_" + ("preemptible_" if pre else "") + "nvidia_" + core.lower().replace("-", "_") + "_gpus"
+        for qid, q in book.vinfos.items():
+            if (q.get("metric") or "").endswith("/" + metric):
+                return {"kind": "vertex_gpu", "qid": qid, "dims": {"region": region}, "service": "aiplatform.googleapis.com", "accel": accel,
+                        "pre": pre, "label": f"Vertex AI serving {core} GPUs",
+                        "note": "Vertex AI counts the GPUs its endpoints serve with against this quota"}
+    return {"kind": "vertex_gpu", "qid": None, "dims": {"region": region}, "service": "aiplatform.googleapis.com", "accel": accel, "pre": pre,
+            "label": f"Vertex AI serving {accel_cores(accel)[-1]} GPUs", "note": "no Vertex AI serving quota found for this GPU"}
 
 
 def preemptible_active(book, qid, region):
@@ -3388,21 +4108,29 @@ def layers_for(ctx, shape, region, method):
     gq.update(need=gpus, scope=region, accel=accel)
     gq.setdefault("pre", False)
     out.append(gq)
+    # a machine family Google gives its own vCPU quota (A2_CPUS, N2_CPUS) is charged there, not to the general CPUS quota
+    famcpu = f"{shape['family'].upper()}-CPUS-per-project-region"
     if pre and preemptible_active(book, "PREEMPTIBLE-CPUS-per-project-region", region):
         cq = {"kind": "pcpu", "qid": "PREEMPTIBLE-CPUS-per-project-region", "label": "preemptible vCPUs"}
-    elif shape["family"] == "a2":
-        cq = {"kind": "a2cpu", "qid": "A2-CPUS-per-project-region", "label": "A2 vCPUs"}
+    elif famcpu in book.infos or legacy_metric(famcpu) in (book.legacy.get(region) or {}):
+        cq = {"kind": "famcpu", "qid": famcpu, "label": f"{shape['family'].upper()} vCPUs"}
     else:
         cq = {"kind": "cpu", "qid": "CPUS-per-project-region", "label": "vCPUs"}
     cq.update(dims={"region": region}, need=shape["vcpus"], scope=region)
     out.append(cq)
     out.append({"kind": "cpu_all", "qid": "CPUS-ALL-REGIONS-per-project", "dims": {}, "need": shape["vcpus"], "scope": "all regions", "label": "vCPUs (all regions)"})
-    if method in ("vms", "spot", "flex", "flex-group"):
+    if method in ("vms", "spot", "flex", "flex-group") and shape.get("boot_disk"):
         dt_ = shape["boot_disk"]
-        qid = DISK_QUOTA.get(dt_)
+        qid = disk_quota_for(ctx, dt_)
         if qid:
-            out.append({"kind": "disk" if dt_ == "hyperdisk-balanced" else "ssd", "qid": qid, "dims": {"region": region}, "need": ctx.opts.get("boot_disk_gb") or BOOT_DISK_GB,
+            # Compute's own quota view reports some disk quotas (SSD-TOTAL-GB) with usage; the others are counted from the disks held
+            kind = "ssd" if legacy_metric(qid) in (book.legacy.get(region) or {}) else "disk"
+            out.append({"kind": kind, "qid": qid, "dims": {"region": region}, "need": ctx.opts.get("boot_disk_gb") or BOOT_DISK_GB,
                         "scope": region, "disk_type": dt_, "label": f"{dt_} GB"})
+    if (ctx.opts or {}).get("target") == "vertex" and method in ("reservation", "calendar"):
+        vq = vertex_quota_for(ctx, shape["accel"], region)
+        if vq:
+            out.append(dict(vq, need=gpus, scope=region))
     return out
 
 
@@ -3451,6 +4179,12 @@ def refresh_quota(ctx, regions):
         s.say(f"usage: Compute Engine API, projects.get and regions.get for {', '.join(regions[:6])}{' and more' if len(regions) > 6 else ''}; "
               f"instances, reservations and disks with aggregatedList, counted per region")
         ctx.book.load_usage(ctx, regions)
+        if (ctx.opts or {}).get("target") == "vertex":
+            s.say("Vertex AI serving: Cloud Quotas API, quotaInfos.list for aiplatform.googleapis.com; Agent Platform API, endpoints.list in each "
+                  "region, counting each deployed model's GPUs at its minimum replicas")
+            ctx.book.load_vertex(ctx, regions)
+            if ctx.book.verror:
+                s.say(f"Vertex AI serving quotas unreadable: {ctx.book.verror.title}", "y")
         if ctx.book.infos:
             ctx.gov.set_limits(ctx.book.infos)
             s.say(f"API pacing: this tool now spends at most {RATE_FRACTION:.0%} of each per-minute Compute API limit read above")
@@ -3461,15 +4195,49 @@ def refresh_quota(ctx, regions):
 
 
 # ------------------------------------------------------------------ prices
-# Billing catalog descriptions for GPU SKUs: (text that must appear, text that must not). Read from the live
-# catalog (service 6F81-5844-456A, Compute Engine); a GPU missing here simply shows n/a.
-GPU_SKU = {"nvidia-rtx-pro-6000": [("RTX 6000 96GB", None)], "nvidia-l4": [("Nvidia L4 GPU", None)], "nvidia-tesla-t4": [("Nvidia Tesla T4 GPU", None)],
-           "nvidia-tesla-v100": [("Nvidia Tesla V100 GPU", None)], "nvidia-tesla-p4": [("Nvidia Tesla P4 GPU", None)],
-           "nvidia-tesla-p100": [("Nvidia Tesla P100 GPU", None)], "nvidia-tesla-a100": [("Nvidia Tesla A100 GPU", "80GB")],
-           "nvidia-a100-80gb": [("Nvidia Tesla A100 80GB GPU", None)], "nvidia-h100-80gb": [("Nvidia H100 80GB GPU", "Mega")],
-           "nvidia-h100-mega-80gb": [("H100 80GB Mega", None), ("H100 Mega 80GB", None), ("H100 80GB Plus", None)],
-           "nvidia-h200-141gb": [("H200 141GB GPU", None)], "nvidia-b200": [("Nvidia B200 (1 gpu slice)", None)]}
-BUNDLED_PRICE = {"nvidia-b200"}
+# GPU, core and memory SKUs are matched to each machine by the words of its own live names (accelerator label and machine type),
+# never by a list of SKU names; a machine whose parts cannot be matched without guessing shows n/a.
+def sku_words(text):
+    return re.findall(r"[a-z]+\d+[a-z0-9]*|\d+[a-z]*|[a-z]+", (text or "").lower())
+
+
+def accel_words(cat, acc):
+    a = (cat.get("accels") or {}).get(acc) or {}
+    return set(sku_words(a.get("label"))) | set(sku_words(re.sub(r"^nvidia-", "", acc).replace("-", " ")))
+
+
+def gpu_sku_price(cat, rows, acc, model, families):
+    """(USD per GPU-hour, SKU description) for an accelerator in one price class, chosen by name words; (None, None) when no SKU matches."""
+    mine = accel_words(cat, acc)
+    mem = ((cat.get("accels") or {}).get(acc) or {}).get("mem_gb")
+    tokens = {w for w in mine if re.search(r"\d", w) and not re.fullmatch(r"\d+gb", w)}
+    alpha = {w for w in mine if not re.search(r"\d", w)}
+    required, forbidden = set(), set()
+    for other, oa in (cat.get("accels") or {}).items():
+        if other == acc or (mem and oa.get("mem_gb") and int(mem) != int(oa["mem_gb"])):
+            continue
+        theirs = accel_words(cat, other)
+        if tokens & {w for w in theirs if re.search(r"\d", w)} == tokens:
+            # a sibling sharing the model number (H100 and H100 Mega): the words that tell them apart decide
+            required |= alpha - theirs
+            forbidden |= {w for w in theirs if not re.search(r"\d", w)} - alpha
+    best = None
+    for desc, m, usd, gpu in ((r + [False])[:4] for r in rows):
+        if m != model or not gpu:
+            continue
+        w = set(sku_words(desc))
+        if not tokens or not tokens <= w or required - w or forbidden & w:
+            continue
+        mems = {x for x in w if re.fullmatch(r"\d+gb", x)}
+        if mems and mem and mems != {f"{int(mem)}gb"}:
+            continue
+        stray = {x for x in w if re.search(r"[a-z]\d|\d[a-z]", x) and x not in mine and not re.fullmatch(r"\d+gb", x)} - set(families)
+        if stray:
+            continue
+        score = (len(alpha - w) + len({x for x in w if not re.search(r"\d", x)} - alpha), len(desc))
+        if best is None or score < best[0]:
+            best = (score, usd, desc)
+    return (best[1], best[2]) if best else (None, None)
 
 
 def fetch_prices(ctx):
@@ -3504,14 +4272,14 @@ def fetch_prices(ctx):
         else:
             model = "ondemand"
         for r in k.get("serviceRegions") or []:
-            out.setdefault(r, []).append([desc, model, usd])
+            out.setdefault(r, []).append([desc, model, usd, bool(gpu)])
     return {"fetched": now(), "regions": out}
 
 
 def prices(ctx, refresh=False):
     if ctx.prices and not refresh and not ctx.prices.get("error"):
         return ctx.prices
-    path = ctx.cache_path("prices-v3")
+    path = ctx.cache_path("prices-v4")
     with ctx.rep.step("Reading GPU prices", "Google's public list prices, per region and holding method; read only, nothing is bought") as s:
         cur = load_json(path, {})
         if from_cache(s, path, cur, PRICE_TTL_S, refresh):
@@ -3537,46 +4305,41 @@ def price_of(ctx, shape, region, method):
     model = {"spot": "spot", "flex": "flex", "flex-group": "flex", "calendar": "calendar"}.get(method, "ondemand")
 
     def find(pred, m):
-        for desc, mm, usd in rows:
-            if mm == m and pred(desc):
-                return usd
+        for r in rows:
+            if r[1] == m and pred(r[0]):
+                return r[2]
         return None
 
     fam = shape["family"].upper()
     acc = shape["accel"]
+    cat = ctx.catalog or {}
+    families = {s["family"] for s in (cat.get("shapes") or {}).values() if s.get("accel") == acc}
+    gpu, gdesc = gpu_sku_price(cat, rows, acc, model, families)
+    # a machine variant with its own core and memory SKUs (A3Mega, A3Ultra) is named from the machine type itself: a3-megagpu-8g gives A3Mega
+    seg = (shape["base"].split("-") + [""])[1]
+    variant = fam + re.sub(r"gpu$", "", seg).capitalize() if seg and seg[0].isalpha() else None
 
-    def gpu_price():
-        for want, avoid in GPU_SKU.get(acc) or []:
-            g = find(lambda d: want in d and (avoid is None or avoid not in d), model)
-            if g is not None:
-                return g
-        return None
+    def part(tok, what, m):
+        rx = re.compile(rf"\b{tok}( [A-Za-z]+)? (Instance )?{what}\b")
+        return find(lambda d: rx.search(d) and "Custom" not in d and "Sole Tenancy" not in d, m)
 
-    if acc in BUNDLED_PRICE:
-        g = gpu_price()
-        return None if g is None else round(g * shape["gpus"], 4)
-    if shape["family"] == "n1":
-        tokens = ["N1 Predefined"]
-    else:
-        # A3 Mega and A3 Ultra carry their own SKU names (A3Mega, A3Ultra); plain A3 is the fallback
-        sub = {"megagpu": ["A3Mega", "A3Plus"], "ultragpu": ["A3Ultra"]}.get((shape["base"].split("-") + ["", ""])[1], [])
-        tokens = sub + [fam]
     core = ram = None
-    for tok in tokens:
-        core_rx, ram_rx = re.compile(rf"\b{tok} (Instance )?Core\b"), re.compile(rf"\b{tok} (Instance )?Ram\b")
-        core = find(lambda d: core_rx.search(d) and "Custom" not in d and "Sole Tenancy" not in d, model)
-        ram = find(lambda d: ram_rx.search(d) and "Custom" not in d and "Sole Tenancy" not in d, model)
-        if core is not None and ram is not None:
-            break
+    if variant:
+        core, ram = part(variant, "Core", model), part(variant, "Ram", model)
+        if (core is None or ram is None) and any(part(variant, "Core", m) is not None for m in ("ondemand", "spot", "flex", "calendar")):
+            # the variant has its own SKUs under another holding method but none named for this one: borrowing the family's would guess
+            return None
     if core is None or ram is None:
+        core, ram = part(fam, "Core", model), part(fam, "Ram", model)
+    if core is None or ram is None:
+        # a machine priced whole by its GPU slice names its family in the GPU SKU itself (A4 Nvidia B200 (1 gpu slice))
+        if gpu is not None and fam.lower() in sku_words(gdesc):
+            return round(gpu * shape["gpus"], 4)
         return None
     total = shape["vcpus"] * core + shape["mem_gib"] * ram
-    if GPU_SKU.get(acc):
-        g = gpu_price()
-        if g is None:
-            return None
-        total += g * shape["gpus"] * shape["fraction"]
-    return round(total, 4)
+    if gpu is None:
+        return None
+    return round(total + gpu * shape["gpus"] * shape["fraction"], 4)
 
 
 # ------------------------------------------------------------------ Google's capacity signals
@@ -3623,50 +4386,35 @@ def calendar_search(ctx, shape, region, count, start_after_s, start_before_s, mi
 
 
 # ------------------------------------------------------------------ NVIDIA workloads on Google Cloud
-# Google pages about NVIDIA on Google Cloud: the only links this tool shows for NVIDIA products, GPUs and VM images.
-DOCS = {
-    "model_garden": ("Overview of Model Garden", "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-garden/explore-models"),
-    "deploy_open": ("Deploy open models from Model Garden",
-                    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/open-models/deploy-model-garden"),
-    "gpus": ("GPU machine types", "https://docs.cloud.google.com/compute/docs/gpus"),
-    "gpu_regions": ("GPU regions and zones", "https://docs.cloud.google.com/compute/docs/regions-zones/gpu-regions-zones"),
-    "accel": ("Accelerator-optimized machine family", "https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines"),
-    "provisioning": ("Compute Engine provisioning models", "https://docs.cloud.google.com/compute/docs/instances/provisioning-models"),
-    "drivers": ("Install NVIDIA GPU drivers", "https://docs.cloud.google.com/compute/docs/gpus/install-drivers-gpu"),
-    "os": ("Operating system details", "https://docs.cloud.google.com/compute/docs/images/os-details"),
-    "dlvm": ("Deep Learning VM images", "https://docs.cloud.google.com/deep-learning-vm/docs/images"),
-    "marketplace": ("Get products from Google Cloud Marketplace", "https://docs.cloud.google.com/marketplace/docs/get-products"),
-    "nim": ("Serving inferences with NVIDIA NIM", "https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/predictions/deploy-genai"),
-    "nim_gke": ("Deploy an AI model on GKE with NVIDIA NIM, Google codelab", "https://codelabs.developers.google.com/codelabs/nvidia-nim-google-cloud"),
-    "omniverse": ("NVIDIA Omniverse on Google Cloud, Google Cloud solutions",
-                  "https://googlecloudplatform.github.io/cloud-solutions/nvidia-omniverse-on-google-cloud/"),
-    "kit_streaming": ("Deploy NVIDIA Omniverse Kit App Streaming on Google Cloud",
-                      "https://googlecloudplatform.github.io/cloud-solutions/nvidia-omniverse-on-google-cloud/kit-app-streaming/"),
-    "omniverse_gke": ("GKE platform for NVIDIA Omniverse applications",
-                      "https://googlecloudplatform.github.io/cloud-solutions/nvidia-omniverse-on-google-cloud/gke-base-platform/"),
-    "bionemo": ("NVIDIA BioNeMo on GKE, GKE AI Labs", "https://gke-ai-labs.dev/docs/blueprints/bionemo/"),
-    "bionemo_blog": ("NVIDIA BioNeMo and GKE, Google Cloud blog",
-                     "https://cloud.google.com/blog/products/ai-machine-learning/accelerate-ai-in-healthcare-nvidia-bionemo-gke"),
-}
-# NVIDIA products that Google documents for Google Cloud. No Google API lists Marketplace products, so each entry names the Google pages
-# it comes from and the GPU rule those pages state. "g_series": the accelerator-optimized G series, which the GPU machine types page
-# names for NVIDIA Omniverse and which carries the RTX GPUs Google's Omniverse GKE guide asks for; "min": the fewest GPUs of each type
-# per unit that the page lists; "model": GPUs depend on the model served.
-NVIDIA_SOLUTIONS = [
-    {"key": "omniverse-dev-ws", "name": "NVIDIA Omniverse Development Workstation (Linux or Windows)", "where": "Compute Engine VM, Google Cloud Marketplace",
-     "rule": "g_series", "unit": "workstation", "docs": ["omniverse", "gpus"]},
-    {"key": "omniverse-ent-ws", "name": "NVIDIA Omniverse Enterprise Workstation (Linux or Windows)", "where": "Compute Engine VM, Google Cloud Marketplace",
-     "rule": "g_series", "unit": "workstation", "docs": ["omniverse", "gpus"]},
-    {"key": "isaac-sim-ws", "name": "NVIDIA Isaac Sim Development Workstation (Linux or Windows)", "where": "Compute Engine VM, Google Cloud Marketplace",
-     "rule": "g_series", "unit": "workstation", "docs": ["omniverse", "gpus"]},
-    {"key": "kit-streaming", "name": "NVIDIA Omniverse Kit App Streaming", "where": "GKE GPU node pool", "rule": "g_series", "unit": "GPU node",
-     "docs": ["kit_streaming", "omniverse_gke", "gpus"]},
-    {"key": "bionemo", "name": "NVIDIA BioNeMo Framework (ESM-2 training and fine-tuning)", "where": "GKE GPU node pool", "rule": "min", "unit": "job",
-     "min": {"nvidia-l4": 2, "nvidia-tesla-a100": 1, "nvidia-a100-80gb": 1, "nvidia-h100-80gb": 1}, "docs": ["bionemo", "bionemo_blog"],
-     "note": "Google's guide lists 2 x L4, 1 x A100 40GB or higher, or 1 x H100 80GB or higher per job"},
-    {"key": "nim", "name": "NVIDIA NIM microservices", "where": "Agent Platform endpoint or GKE", "rule": "model", "unit": "copy",
-     "docs": ["nim", "nim_gke"], "note": "the GPUs depend on the NIM model; for Nemotron and Cosmos, choose Model Garden for Google's tested sizes"},
-]
+class AuditOnly:
+    """A step-like sink for background reads (a link being checked): what it says goes to the audit log, not the screen."""
+
+    def say(self, msg, style=None, always=False):
+        audit("read", msg=msg)
+
+
+def doc_link(ctx, key):
+    """(title, address) of a configured page, read once to confirm it is live and to take its own title; (None, None) when it is gone."""
+    seen = PUBLISHED.setdefault("links", {})
+    if key in seen:
+        return seen[key]
+    url = doc_url(key)
+    out = (None, None)
+    if url:
+        try:
+            page = read_page(ctx, AuditOnly(), url)
+            title = re.split(r"\s+[|\u2014]\s+", page.get("title") or "")[0].strip() or key.replace("_", " ")
+            out = (title, page.get("final") or url)
+        except PageError as e:
+            ctx.rep.say(f"link {key} left out: {e.why} ({url}); set another address in GPUF_DOC_PAGES", "y")
+    seen[key] = out
+    return out
+
+
+def doc_addr(ctx, key):
+    """A configured page's address once it is confirmed live, or a note that it is not."""
+    t, u = doc_link(ctx, key)
+    return u or f"(the {key} page in GPUF_DOC_PAGES could not be read)"
 
 
 def vertex_accel(name):
@@ -3676,20 +4424,30 @@ def vertex_accel(name):
 
 def serving_args(args):
     """Google's tested serving settings in a Model Garden container: tensor parallel size, context length, concurrent sequences."""
-    keys = {"tensor-parallel-size": "tp", "tp": "tp", "tp-size": "tp", "max-model-len": "max_len", "context-length": "max_len",
-            "max-num-seqs": "max_seqs", "max-running-requests": "max_seqs"}
+    keys = {"tensor-parallel-size": "tp", "tp": "tp", "tp-size": "tp", "pipeline-parallel-size": "pp", "pp": "pp", "pp-size": "pp",
+            "data-parallel-size": "dp", "dp": "dp", "dp-size": "dp", "ep": "ep_size", "ep-size": "ep_size",
+            "max-model-len": "max_len", "context-length": "max_len", "max-num-seqs": "max_seqs", "max-running-requests": "max_seqs"}
     out = {}
     for a in args or []:
-        m = re.match(r"--([a-z-]+)=(\S+)$", str(a))
+        a = str(a)
+        if re.fullmatch(r"--enable-expert-parallel", a):
+            out["ep"] = True
+            continue
+        m = re.match(r"--([a-z_-]+)=(\S+)$", a)
         if not m:
             continue
         k, v = m.groups()
+        k = k.replace("_", "-")
         if k in keys and v.isdigit():
             out[keys[k]] = int(v)
         elif k == "kv-cache-dtype":
             out["kv_dtype"] = v.lower()
         elif k in ("gpu-memory-utilization", "mem-fraction-static") and re.fullmatch(r"\d*\.?\d+", v):
             out["mem_frac"] = float(v)
+        elif k == "model":
+            out["model_path"] = v
+    if out.get("ep_size"):
+        out["ep"] = True
     return out
 
 
@@ -3707,14 +4465,19 @@ def parse_model_garden(models):
                 continue
             cs = x.get("containerSpec") or {}
             env = env or {v.get("name"): v.get("value") for v in cs.get("env") or []}
+            dr = x.get("dedicatedResources") or {}
             configs.append(dict(machine=spec["machineType"], accel=vertex_accel(spec["acceleratorType"]), gpus=int(spec.get("acceleratorCount") or 1),
-                                task=x.get("deployTaskName"), **serving_args(cs.get("args"))))
+                                task=x.get("deployTaskName"), engine=(cs.get("imageUri") or "").rsplit("/", 1)[-1].split(":")[0] or None,
+                                max_replicas=dr.get("maxReplicaCount"), sample=bool((x.get("deployMetadata") or {}).get("sampleRequest")),
+                                **serving_args(cs.get("args"))))
         if not configs:
             continue
         name = dep.get("modelDisplayName") or multi[0].get("modelDisplayName") or m.get("versionId")
         gen = str(env.get("DIFFUSION_MODEL", "")).lower() == "true" or bool(re.search(r"image|video", env.get("TASK") or ""))
+        # the weights Google serves sit in its own bucket under the publisher's repository name; that name is a second way to find the repository
+        paths = sorted({"/".join(c["model_path"].rstrip("/").split("/")[-2:]) for c in configs if c.get("model_path", "").count("/") >= 3})
         out.append({"key": m.get("versionId") or name, "model": m["name"].rsplit("/", 1)[-1], "name": name, "stage": m.get("launchStage"),
-                    "source_id": env.get("MODEL_ID"), "kind": "generation" if gen else "llm",
+                    "source_id": env.get("MODEL_ID"), "source_alts": [p for p in paths if p != env.get("MODEL_ID")], "kind": "generation" if gen else "llm",
                     "default_machine": ((dep.get("dedicatedResources") or {}).get("machineSpec") or {}).get("machineType"), "configs": configs,
                     "precision": None if gen else model_precision(name)})
     return sorted(out, key=lambda e: (e["model"], e["name"]))
@@ -3742,12 +4505,13 @@ def license_name(lic):
     n = lic.get("name") or ""
     if d and d != n:
         return re.sub(r"^License for\s+", "", d)
-    words = {"nvidia": "NVIDIA", "vmi": "VMI", "gpu": "GPU", "ngc": "NGC", "hpc": "HPC", "sdk": "SDK", "ai": "AI"}
-    return " ".join(words.get(w, w.capitalize()) for w in n.split("-"))
+    # a license id is its product's name in lower case: short words are acronyms (GPU, VMI), the publisher keeps its own casing
+    return " ".join(w.upper() if len(w) <= 3 or w == MODEL_GARDEN_PUBLISHER else w.capitalize() for w in n.split("-"))
 
 
-def group_marketplace(images, licenses=None, since=None):
+def group_marketplace(images, licenses=None, since=None, project=None):
     """NVIDIA Marketplace VM products: the newest current image of each NVIDIA license, from the publisher's image project."""
+    project = project or csv_list(MARKETPLACE_IMAGE_PROJECT)[0]
     prods = {}
     for im in images:
         if im.get("deprecated") or re.search(r"^internal-|-test", im.get("name", "")) or (since and im.get("creationTimestamp", "") < since):
@@ -3761,7 +4525,7 @@ def group_marketplace(images, licenses=None, since=None):
                 os_ = [u.rsplit("/", 1)[-1] for u in im.get("licenses") or [] if not u.rsplit("/", 1)[-1].startswith("nvidia-")]
                 link = im.get("selfLink") or ""
                 image = ("projects/" + link.split("/projects/", 1)[1]) if "/projects/" in link else \
-                    f"projects/{MARKETPLACE_IMAGE_PROJECT}/global/images/{im['name']}"
+                    f"projects/{project}/global/images/{im['name']}"
                 prods[url] = {"license": url, "id": lname, "image": image, "created": im["creationTimestamp"], "arch": im.get("architecture"),
                               "disk_gb": int(im.get("diskSizeGb") or 0), "os": ", ".join(os_),
                               "gvnic": any(g.get("type") == "GVNIC" for g in im.get("guestOsFeatures") or [])}
@@ -3775,26 +4539,31 @@ def group_marketplace(images, licenses=None, since=None):
 
 
 def marketplace_products(ctx, s, refresh=False):
-    """NVIDIA's Marketplace VM images, read live from the publisher's public image project, with each license's name and fee flag."""
-    path = ctx.cache_path(f"marketplace-{MARKETPLACE_IMAGE_PROJECT}")
+    """NVIDIA's Marketplace VM images, read live from the publisher's public image projects, with each license's name and fee flag."""
+    projects = csv_list(MARKETPLACE_IMAGE_PROJECT)
+    path = ctx.cache_path("marketplace-" + safe_name(*projects, limit=80))
     cur = load_json(path, {})
     if from_cache(s, path, cur, CATALOG_TTL_S, refresh):
         return cur["products"], cur["read"]
-    s.say(f"Compute Engine API: images.list in the public project {MARKETPLACE_IMAGE_PROJECT}, then licenses.get for each NVIDIA license on a "
-          f"current image (the license names the Marketplace product and says whether Google charges a fee)")
-    imgs = list(ctx.api.pages(f"{COMPUTE}/projects/{MARKETPLACE_IMAGE_PROJECT}/global/images", "items",
-                              {"maxResults": 500, "fields": "items(name,selfLink,licenses,architecture,diskSizeGb,creationTimestamp,deprecated/state,"
-                                                            "guestOsFeatures/type),nextPageToken"}))
     since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now() - IMAGE_LOOKBACK_DAYS * 86400))
-    lics = {}
-    for p in group_marketplace(imgs, None, since):
-        try:
-            lics[p["license"]] = ctx.api.get(p["license"].replace("https://www.googleapis.com/compute/v1", COMPUTE))
-        except ApiError as e:
-            lics[p["license"]] = {"name": p["id"], "error": classify(e, ctx.project).title}
-    rec = {"fetched": now(), "read": iso(), "products": group_marketplace(imgs, lics, since)}
+    products, n = [], 0
+    for proj in projects:
+        s.say(f"Compute Engine API: images.list in the public project {proj}, then licenses.get for each NVIDIA license on a "
+              f"current image (the license names the Marketplace product and says whether Google charges a fee)")
+        imgs = list(ctx.api.pages(f"{COMPUTE}/projects/{proj}/global/images", "items",
+                                  {"maxResults": 500, "fields": "items(name,selfLink,licenses,architecture,diskSizeGb,creationTimestamp,deprecated/state,"
+                                                                "guestOsFeatures/type),nextPageToken"}))
+        n += len(imgs)
+        lics = {}
+        for p in group_marketplace(imgs, None, since, proj):
+            try:
+                lics[p["license"]] = ctx.api.get(p["license"].replace("https://www.googleapis.com/compute/v1", COMPUTE))
+            except ApiError as e:
+                lics[p["license"]] = {"name": p["id"], "error": classify(e, ctx.project).title}
+        products += group_marketplace(imgs, lics, since, proj)
+    rec = {"fetched": now(), "read": iso(), "products": sorted(products, key=lambda p: p["created"], reverse=True)}
     atomic_json(path, rec, 0o644)
-    s.say(f"{len(imgs)} images read; the current products {saved_where(path)}")
+    s.say(f"{n} images read; the current products {saved_where(path)}")
     return rec["products"], rec["read"]
 
 
@@ -3856,26 +4625,12 @@ def os_images(ctx, refresh=False):
     return groups, rec["read"]
 
 
-def hf_get(path, params=None, ca_bundle=None):
-    url = f"{HF}{path}" + ("?" + urllib.parse.urlencode(params) if params else "")
-    ctx_ = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else ssl.create_default_context()
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx_))
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    t0 = now()
-    try:
-        with opener.open(req, timeout=HF_TIMEOUT_S) as r:
-            raw = r.read()
-            status = r.status
-    except urllib.error.HTTPError as e:
-        audit("http", m="GET", host="huggingface.co", path=path, query=urllib.parse.urlencode(params or {}), status=e.code, ms=int((now() - t0) * 1000),
-              bytes=0, note=str(e.reason))
-        raise
-    except OSError as e:
-        audit("http", m="GET", host="huggingface.co", path=path, status=0, ms=int((now() - t0) * 1000), bytes=0, note=f"{type(e).__name__}: {e}")
-        raise
-    audit("http", m="GET", host="huggingface.co", path=path, query=urllib.parse.urlencode(params or {}), status=status, ms=int((now() - t0) * 1000),
-          bytes=len(raw), note="public metadata, no account or token sent")
-    return json.loads(raw)
+def hf_get(ctx, path, params=None):
+    """A public Hugging Face read: (HTTP status, parsed body or None)."""
+    st, body, _, _ = web_get(ctx, f"{HF}{path}" + ("?" + urllib.parse.urlencode(params) if params else ""))
+    if st != 200:
+        return st, None
+    return st, json.loads(body)
 
 
 def model_precision(repo, dtypes=None):
@@ -3894,28 +4649,47 @@ def model_precision(repo, dtypes=None):
     return "BF16"
 
 
-def model_details(ctx, repo, s):
-    """Weight size and cache-relevant architecture of the repository a Model Garden model deploys (its MODEL_ID); failures are reported."""
-    path = ctx.cache_path("arch-v2-" + safe_name(repo, limit=120))
+def model_details(ctx, repos, s):
+    """Weight size and cache-relevant architecture of the repository a model is served from. Each candidate name is tried in order
+    (Model Garden's MODEL_ID, then the repository named by the path its container loads) and the one that answers is recorded."""
+    repos = [r for i, r in enumerate(repos or []) if r and r not in repos[:i]]
+    if not repos:
+        return {"errors": ["no source repository is named for this model"], "kv": {}, "tried": []}
+    path = ctx.cache_path("arch-v3-" + safe_name(repos[0], limit=120))
     cur = load_json(path, {})
     if from_cache(s, path, cur, CATALOG_TTL_S, False):
         return cur["info"]
-    s.say(f"huggingface.co, public metadata, no account or token sent: GET /api/models/{repo}?blobs=true (file sizes) and "
-          f"GET /{repo}/resolve/main/config.json (layers)")
-    info = {"repo": repo, "weights_gb": None, "precision": model_precision(repo), "errors": []}
+    tried, repo, d = [], None, None
+    for cand in repos:
+        s.say(f"huggingface.co, public metadata, no account or token sent: GET /api/models/{cand}?blobs=true")
+        try:
+            st, body = hf_get(ctx, f"/api/models/{cand}", {"blobs": "true"})
+        except OSError as e:
+            tried.append(f"{cand}: unreachable ({type(e).__name__})")
+            continue
+        if st == 200 and body:
+            repo, d = cand, body
+            break
+        tried.append(f"{cand}: HTTP {st}")
+    info = {"repo": repo, "tried": tried, "weights_gb": None, "precision": model_precision(repos[0]), "errors": []}
+    if not repo:
+        info["errors"].append("no published repository answered (" + "; ".join(tried) + ")")
+        info["kv"] = kv_profile({})
+        return info
+    if tried:
+        s.say(f"{'; '.join(tried)}; {repo} answered and is used", "y")
+    size = sum(f.get("size") or 0 for f in d.get("siblings") or [] if f.get("rfilename", "").endswith(".safetensors"))
+    st_ = d.get("safetensors") or {}
+    info["weights_gb"] = round(size / 1e9, 1) if size else None
+    info["params"] = st_.get("total")
+    info["precision"] = model_precision(repo, (st_.get("parameters") or {}).keys())
+    if not size:
+        info["errors"].append(f"{repo} lists no weight files")
+    s.say(f"huggingface.co: GET /{repo}/resolve/main/config.json (layers)")
     try:
-        d = hf_get(f"/api/models/{repo}", {"blobs": "true"}, ctx.opts.get("ca_bundle"))
-        size = sum(f.get("size") or 0 for f in d.get("siblings") or [] if f.get("rfilename", "").endswith(".safetensors"))
-        st = d.get("safetensors") or {}
-        info["weights_gb"] = round(size / 1e9, 1) if size else None
-        info["params"] = st.get("total")
-        info["precision"] = model_precision(repo, (st.get("parameters") or {}).keys())
-        if not size:
-            info["errors"].append(f"{repo} lists no weight files")
-    except (OSError, ValueError) as e:
-        info["errors"].append(f"weights of {repo} unreadable: {type(e).__name__}: {e}")
-    try:
-        cfg = hf_get(f"/{repo}/resolve/main/config.json", None, ctx.opts.get("ca_bundle"))
+        st, cfg = hf_get(ctx, f"/{repo}/resolve/main/config.json")
+        if st != 200 or not cfg:
+            raise ValueError(f"HTTP {st}")
         info["kv"] = kv_profile(cfg)
         if not info["kv"].get("kv_per_token"):
             info["errors"].append(f"{repo} ({', '.join(cfg.get('architectures') or ['unknown architecture'])}) has no attention layout "
@@ -3957,8 +4731,10 @@ def kv_profile(cfg):
         n_attn = cfg.get("num_hidden_layers") or 0
         kv_elems = n_attn * kvh * head_dim
     ssm = n_mamba * (cfg.get("mamba_num_heads") or 0) * (cfg.get("mamba_head_dim") or 0) * (cfg.get("ssm_state_size") or 0) * FIT_SSM_BYTES
+    # a mixture-of-experts model names its experts in config.json (or marks MoE layers 'E' in a hybrid pattern)
+    moe = bool(any(cfg.get(k) for k in ("n_routed_experts", "num_experts", "num_local_experts", "moe_num_experts")) or (pat and "E" in pat))
     return {"kv_per_token": 2 * kv_elems * FIT_KV_BYTES, "ssm_per_seq": ssm, "attn_layers": n_attn, "mamba_layers": n_mamba,
-            "max_context": cfg.get("max_position_embeddings")}
+            "max_context": cfg.get("max_position_embeddings"), "moe": moe}
 
 
 def per_request_gb(info, context, cfg=None):
@@ -3971,14 +4747,34 @@ def per_request_gb(info, context, cfg=None):
     return (kv["kv_per_token"] * scale * context + (kv.get("ssm_per_seq") or 0)) / 1e9
 
 
-def copy_capacity(info, mem_gb, per_copy, context, cfg):
-    """Requests one copy of the model holds at once: GPU memory left after the weights over the cache per request, capped by Google's tested setting."""
+def engine_layout(cfg, gpus_vm):
+    """How a serving configuration spreads one copy over GPUs: tensor x pipeline x data parallel, and the GPUs of the VM it leaves idle."""
+    tp = (cfg or {}).get("tp")
+    if not tp:
+        return None
+    pp, dp = cfg.get("pp") or 1, cfg.get("dp") or 1
+    return {"tp": tp, "pp": pp, "dp": dp, "gpus": tp * pp * dp, "idle": max(0, gpus_vm - tp * pp * dp), "ep": bool(cfg.get("ep"))}
+
+
+def copy_capacity(info, mem_gb, gpus_vm, context, cfg):
+    """(requests one copy holds at once, why it cannot be estimated). Per data-parallel rank: the memory of its TP x PP GPUs left after the
+    weights, over the cache one request needs, capped by the configuration's max-num-seqs, which vLLM applies per rank."""
     seq, w = per_request_gb(info, context, cfg), (info or {}).get("weights_gb")
     if seq is None or not w or not mem_gb:
-        return None
-    room = per_copy * (mem_gb * (cfg.get("mem_frac") or FIT_USABLE_FRAC) - FIT_RUNTIME_GB) - w
+        return None, "the model's published architecture or weight size could not be read"
+    lay = engine_layout(cfg, gpus_vm)
+    if lay is None:
+        return None, "the serving configuration does not state its tensor parallel size"
+    if lay["gpus"] > gpus_vm:
+        return None, f"TP {lay['tp']} x PP {lay['pp']} x DP {lay['dp']} needs {lay['gpus']} GPUs; the VM has {gpus_vm}"
+    if lay["dp"] > 1 and ((info or {}).get("kv") or {}).get("moe"):
+        return None, (f"{lay['dp']} data-parallel ranks of a mixture-of-experts model: vLLM shards the experts across all {lay['gpus']} GPUs and "
+                      f"repeats the rest on each rank, and the split is not published, so requests per copy are not estimated")
+    room = lay["tp"] * lay["pp"] * (mem_gb * ((cfg or {}).get("mem_frac") or FIT_USABLE_FRAC) - FIT_RUNTIME_GB) - w
     cap = int(room // seq) if room > 0 else 0
-    return min(cap, cfg["max_seqs"]) if cfg.get("max_seqs") else cap
+    if (cfg or {}).get("max_seqs"):
+        cap = min(cap, cfg["max_seqs"])
+    return cap * lay["dp"], None
 
 
 def fit_rows(ctx, per_unit, arch=None, family=None):
@@ -4000,30 +4796,62 @@ def fit_rows(ctx, per_unit, arch=None, family=None):
 
 
 def mg_fit(ctx, entry, context, info=None):
-    """Where a Model Garden model runs at this context: GPUs Google tested it on, and every VM size of those GPUs that holds a whole copy."""
-    by_acc, notes, per_copy, cfg_of = {}, [], {}, {}
+    """Where a Model Garden model runs on a Vertex AI endpoint: exactly the configurations Google tested (machine type, GPU type and
+    count), one copy of the model per replica VM. A Vertex AI replica runs one serving container on all of its VM's GPUs, so no other
+    machine type and no second copy on a VM is offered."""
+    rows, notes, cat = [], [], ctx.catalog
     for c in entry["configs"]:
-        by_acc.setdefault(c["accel"], []).append(c)
-    for acc, cfgs in by_acc.items():
-        if acc not in ctx.catalog["accels"]:
-            notes.append(f"Google also tested {', '.join(sorted({c['machine'] for c in cfgs}))}; this project cannot use that GPU in any zone")
+        a, s = cat["accels"].get(c["accel"]), cat["shapes"].get(c["machine"])
+        if not a or not s:
+            notes.append(f"Google tested {c['machine']} ({c['gpus']} x {c['accel']}); this project cannot use it in any zone")
             continue
-        ok = [c for c in sorted(cfgs, key=lambda c: c["gpus"]) if not c.get("max_len") or c["max_len"] >= context]
-        if not ok:
-            notes.append(f"{ctx.catalog['accels'][acc]['label']}: Google tested up to {max(c.get('max_len') or 0 for c in cfgs)} tokens, "
-                         f"fewer than the {context} asked for")
+        if c.get("max_len") and context and c["max_len"] < context:
+            notes.append(f"{c['machine']}: Google's configuration serves up to {c['max_len']} tokens, fewer than the {context} asked for")
             continue
-        per_copy[acc], cfg_of[acc] = ok[0]["gpus"], ok[0]
-    tested = {c["machine"] for c in entry["configs"]}
-    rows = fit_rows(ctx, per_copy)
-    for r in rows:
-        r["tested"], r["cfg"] = r["shape"] in tested, cfg_of[r["accel"]]
+        lay = engine_layout(c, s["gpus"])
+        r = {"accel": c["accel"], "label": a["label"], "shape": c["machine"], "gpus_vm": s["gpus"], "per_copy": s["gpus"], "copies_vm": 1,
+             "mem_gb": a.get("mem_gb"), "vcpus": s["vcpus"], "mem_gib": s["mem_gib"], "tested": True, "mark": "tested by Google", "capacity": None,
+             "cfg": c, "layout": lay, "basis": f"Model Garden: {c.get('task') or c.get('engine') or 'tested'}"
+                                             + (f", TP {lay['tp']} x PP {lay['pp']} x DP {lay['dp']}" if lay else "")}
+        if lay and lay["idle"]:
+            notes.append(f"{c['machine']}: Google's configuration runs TP {lay['tp']} x PP {lay['pp']} x DP {lay['dp']} on {lay['gpus']} of the "
+                         f"VM's {s['gpus']} GPUs; the other {lay['idle']} are attached and billed but not used by the model")
         if entry["kind"] == "llm":
-            r["capacity"] = copy_capacity(info, r["mem_gb"], r["per_copy"], context, r["cfg"])
-    short = sorted({r["label"] for r in rows if r["capacity"] == 0})
+            r["capacity"], r["why"] = copy_capacity(info, a.get("mem_gb"), s["gpus"], context, c)
+            if r["why"]:
+                notes.append(f"{c['machine']}: {r['why']}")
+            if r["capacity"] == 0 and c.get("max_len") and context and c["max_len"] >= context:
+                # vLLM does not start unless one request of --max-model-len tokens fits, so Google's test proves one per copy
+                r["capacity"] = 1
+                notes.append(f"{c['machine']}: the estimate leaves no memory after the weights, but Google's tested setting (--max-model-len "
+                             f"{c['max_len']}, --max-num-seqs {c.get('max_seqs') or 'unset'}) only starts when one request of that length fits, "
+                             f"so 1 request per copy is counted")
+        prev = next((x for x in rows if x["shape"] == r["shape"]), None)
+        if prev is None:
+            rows.append(r)
+        elif (r["capacity"] or 0) > (prev["capacity"] or 0):
+            rows[rows.index(prev)] = r
+    short = sorted({r["shape"] for r in rows if r["capacity"] == 0})
     if short:
         notes.append(f"at {context} tokens per request, a copy on {', '.join(short)} has no memory left for requests after its weights")
     return [r for r in rows if r["capacity"] != 0], notes
+
+
+def vertex_spare(ctx, replicas, s=None):
+    """(spare VMs, Google's sentence) a Vertex AI deployment that consumes a specific reservation needs for updates, read from Google's
+    page about reservations for online inference; (0, why) when the page or its rule cannot be read."""
+    try:
+        page = read_page(ctx, s or AuditOnly(), doc_url("vertex_reservations"))
+    except PageError as e:
+        return 0, f"Google's page on reservations for Vertex AI could not be read ({e.why}), so no spare VMs are counted"
+    text = " ".join(page["blocks"])
+    m = re.search(VERTEX_SPARE_RX, text, re.I)
+    if not m:
+        return 0, f"the spare-VM rule on {page['final']} was not found (GPUF_VERTEX_SPARE_RX), so no spare VMs are counted"
+    nums = [int(x) for x in m.groups() if x and x.isdigit()]
+    floor_, pct = (nums[0], nums[1]) if len(nums) >= 2 else (nums[0], 0)
+    spare = max(floor_, math.ceil(replicas * pct / 100)) if replicas else 0
+    return spare, f"Google: \"{m.group(0).strip()}\" ({page['final']})"
 
 
 def plan_units(rows, units=None, peak=None):
@@ -4037,6 +4865,1048 @@ def plan_units(rows, units=None, peak=None):
         r["gpus_total"] = r["vms"] * r["gpus_vm"] if r["vms"] else None
     # fewest GPUs, then Google's tested machine type, then the smaller VM, which is usually easier to obtain
     return sorted(rows, key=lambda r: (r["gpus_total"] is None, r["gpus_total"] or 0, not r["tested"], r["gpus_vm"], r["vcpus"], r["shape"]))
+
+
+# ------------------------------------------------------------------ NVIDIA NIM: the profiles NVIDIA publishes
+def ngc_key(ctx, prompt=False):
+    """(key, where it came from) for NGC's authenticated reads, kept in memory only and never logged: GPUF_NGC_API_KEY or NGC_API_KEY,
+    then the nvcr.io login enroot keeps for container pulls, then, when asked to, a hidden prompt. (None, None) when there is none."""
+    got = PUBLISHED.get("ngc_key")
+    if got and (got[0] or not prompt):
+        return got
+    out = (None, None)
+    for name in ("GPUF_NGC_API_KEY", "NGC_API_KEY"):
+        if os.environ.get(name):
+            out = (os.environ[name].strip(), f"the {name} environment variable")
+            break
+    if not out[0]:
+        path = os.path.join(os.path.expanduser(os.environ.get("ENROOT_CONFIG_PATH") or "~/.config/enroot"), ".credentials")
+        try:
+            with open(path) as fh:
+                for ln in fh:
+                    p = ln.split()
+                    if len(p) >= 6 and p[0] == "machine" and p[1] == "nvcr.io" and p[2] == "login" and p[3] == "$oauthtoken" and p[4] == "password":
+                        out = (p[5], f"enroot's nvcr.io login in {short_path(path)}")
+                        break
+        except OSError:
+            pass
+    if not out[0] and prompt and ctx.ask.interactive:
+        k = ctx.ask.secret("NGC API key, for the minimum GPUs NVIDIA states on each NIM's model card (hidden, kept in memory only; Enter skips)")
+        if k:
+            out = (k, "typed at the prompt")
+    PUBLISHED["ngc_key"] = out
+    return out
+
+
+def ngc_search(ctx, s, rtype, query, refresh=False):
+    """Every public NGC catalog resource of a type that matches a query, page by page from NGC's public search (no key)."""
+    path = ctx.cache_path("ngc-" + safe_name(rtype, query or "all", limit=60))
+    cur = load_json(path, {})
+    if from_cache(s, path, cur, DOCS_TTL_S, refresh):
+        return cur["data"], cur["read"]
+    s.say(f"NGC catalog, public search, no key sent: {NGC_API}/search/catalog/resources/{rtype} for {query or 'everything'!r}")
+    out, page, total = {}, 0, None
+    while True:
+        q = json.dumps({"query": query, "page": page, "pageSize": 100})
+        try:
+            st, body, _, _ = web_get(ctx, f"{NGC_API}/search/catalog/resources/{rtype}?" + urllib.parse.urlencode({"q": q}))
+        except OSError as e:
+            raise PageError(f"{NGC_API}/search/catalog/resources/{rtype}", f"unreachable ({type(e).__name__})")
+        if st != 200:
+            raise PageError(f"{NGC_API}/search/catalog/resources/{rtype}", f"HTTP {st}")
+        d = json.loads(body)
+        total = d.get("resultPageTotal") or 0
+        for g in d.get("results") or []:
+            for r in g.get("resources") or []:
+                out.setdefault(r["resourceId"], r)
+        page += 1
+        if page >= total:
+            break
+    data = list(out.values())
+    atomic_json(path, {"fetched": now(), "read": iso(), "data": data}, 0o644)
+    s.say(f"{len(data)} {rtype.lower()} resources over {total} pages; " + saved_where(path))
+    return data, iso()
+
+
+def ngc_attrs(r):
+    return {a.get("key"): a.get("value") for a in r.get("attributes") or []}
+
+
+def ngc_labels(r):
+    return {lab.get("key"): lab.get("values") or [] for lab in r.get("labels") or []}
+
+
+def model_slug(name):
+    """A model's name without publisher and precision, to tie a Model Garden version, a NIM and a blueprint's NIM list together."""
+    n = (name or "").rsplit("/", 1)[-1].lower().replace("_", "-")
+    n = re.sub(r"^nvidia-", "", n)
+    return re.sub(r"-(bf16|fp16|fp8|nvfp4|fp4|mxfp4|int4|int8|awq|gptq)$", "", n)
+
+
+def slug_related(a, b):
+    """Whether two model names are the same model, one naming it more fully ('nemotron-3.5-lightning' and 'nemotron-3.5-lightning-30b-a3b')."""
+    return bool(a and b) and (a == b or a.startswith(b + "-") or b.startswith(a + "-"))
+
+
+def nim_list(ctx, s, refresh=False):
+    """NIM containers NVIDIA lists on NGC, newest first: the public search, NIM repositories only."""
+    rows, read = ngc_search(ctx, s, "CONTAINER", "NVIDIA NIM", refresh)
+    teams = set(csv_list(NIM_TEAMS))
+    out = []
+    for r in rows:
+        rid = r.get("resourceId") or ""
+        if not rid.startswith("nim/") or rid.count("/") != 2 or (teams and rid.split("/")[1] not in teams):
+            continue
+        out.append({"id": rid, "name": r.get("displayName") or rid, "slug": model_slug(rid), "updated": (ngc_attrs(r).get("latestTagPushedDate") or "")[:10],
+                    "labels": ngc_labels(r).get("general") or [], "desc": r.get("description") or ""})
+    return sorted(out, key=lambda x: (x["updated"], x["id"]), reverse=True), read
+
+
+def nim_profile(p):
+    gpu = p.get("gpu")
+    gpu = ", ".join(gpu) if isinstance(gpu, list) else gpu
+    dev = p.get("gpu_device")
+    return {"gpu": gpu or None, "precision": (p.get("precision") or "").lower() or None, "tp": int(p.get("tensor_parallel_size") or 1),
+            "pp": int(p.get("pipeline_parallel_size") or 1), "min_vram": p.get("min_vram_per_device_gb"), "lora": bool(p.get("feat_lora")),
+            "device": ", ".join(dev) if isinstance(dev, list) else dev, "tested": list(p.get("tested_gpu_devices") or []),
+            "backend": p.get("inference_backend"), "max_gpus": p.get("max_gpu_count"), "min_cpus": p.get("min_cpu_count"),
+            "host_gb": p.get("system_memory_per_device_gb"), "driver": p.get("min_driver_version")}
+
+
+def pci_names(profiles):
+    """PCI device id to NVIDIA's GPU names, learned from NVIDIA's own GPU-specific profiles (this NIM's, the NIMs read this session and
+    the built-in snapshot), so the ids a profile was validated on can be named."""
+    out = PUBLISHED.setdefault("pci", {})
+    snap = PUBLISHED.get("pci_snap")
+    if snap is None:
+        snap = PUBLISHED["pci_snap"] = {}
+        for rows in nim_snapshot().values():
+            for p in rows:
+                if p.get("device") and p.get("gpu"):
+                    snap.setdefault(p["device"], set()).add(p["gpu"])
+    for p in profiles:
+        if p.get("device") and p.get("gpu") and "," not in p["device"]:
+            out.setdefault(p["device"], set()).add(p["gpu"])
+    merged = {k: set(v) for k, v in snap.items()}
+    for k, v in out.items():
+        merged.setdefault(k, set()).update(v)
+    return merged
+
+
+def nim_validated(p, accel, cat, names):
+    """Whether NVIDIA validated this profile on this Google Cloud GPU: a profile made for it, or one whose validated devices name it."""
+    if p.get("gpu") and re.search(r"\d", p["gpu"]) and nim_gpu_matches(p["gpu"], accel, cat):
+        return True
+    if any(nim_gpu_matches(n, accel, cat) for n in p.get("doc_gpus") or []):
+        return True
+    return any(nim_gpu_matches(n, accel, cat) for dev in p.get("tested") or [] for n in names.get(dev, ()))
+
+
+# the profiles NVIDIA's NIM Metadata API published, for the case where it cannot be reached; regenerated by tests/nim_snapshot.py
+# BEGIN NIM SNAPSHOT
+NIM_PROFILE_SNAPSHOT = {"read": "2026-11-09T19:34:22Z", "tag": "latest", "source": "https://api.ngc.nvidia.com/v2/nim/metadata", "nims": 138,
+                        "data": ("eNrtXW1v4ziS/itBPt0BzUSkKFveb907t8kCvbeDnsHuAINFQ3KU2Be/ZGwlk5nD/fez5De9VJFVtCR7eoVdzMQDVrFIkcViseqp/71eTOe3cRRNb+OnRMyi1eafv0/EmxTB9Z9+/nnx"
+                                 "Opt9uH58kYPrD3Lzv/y3t/3Xz//K/p/9ufnjeqK8a1rLGa3lvz6UZZv7PIEi6Xli/T7XIvSe4msy0ROx6STjP4nnPod/47OUtdTemjWh04fX25fo4WGWLMcr3qT+9z/++t1fP159zMb+"
+                                 "w09/00J7d5+gzq+VF3t/kt5Dcm1jERpYKAuLO5hQ+UMT4SfleTDhyJMmwvuN0FeZvFf3n/7mwyx837Oy+O9/fEaIlbH/zxomG8ahmcz7ASYcxKM64X6hTJ/Gy4fkdp1Gq+yPlRLD+Lhc"
+                                 "4sc9NxnceIflUvxqxcm49uV499+LIhZ5qQ2vUYnVgRwYlbjffsWaHBlZsB9V4Ud9gLNo/Cwel6tknW5UX7y+fZy9vt9I8ZC8ZeO8/u7up6sfXqLVcz55Gt4chVYbvpM0fVn/6fb2YTle"
+                                 "3yzepg/T6Ga8nN9m/b1N16/RTDwli41Km0Xpptvb9evLy3KVinmUrqbvN5N0PrsuM826Drvs+u5+vz2wbrctmuwy+ctyNU6uvvz405X2Qkvv1cYtCnL1w+tLsmKJsyNpTagRZ3ZGXpuC"
+                                 "XH2OXtLlC0uePU2LYn3HEui7tkQJvKF39eNfjboDat+BOOEliLPb5rSpaW+bBxx907YgxR1FnZiWd1RVrPBSxBpx1s/Ia12Q8AIE4a+fURcfir9+OhHrO9Y8fde+KOE5RMlvJJubmFGC"
+                                 "Q6MGOz5cS7BO8wYNdri7DmWzOPA24/n4EF3dJYtkFaXT5cIoioW0HSG///L3bW+fspvKr8lsdvVDsnpLVlf/9TA9iKztItsZnXMA4R9qAP9crp43V+Ks0wY+A8Tt7EMJL24othv783KR"
+                                 "Ju9pf3Pvb+79zf2PeXPvr8v9dbm/LvfX5f66fCnX5f5i2F8M+4thfzH8I18M1+PJYiNDfynsL4X9pbB/zu3vp/39tL+f9vfT/n7aP+f2z7n9rb2/tfe39v7Wfq5b+0OSvKyT5Flsmh/+"
+                                 "Xsn8sp5pqEN0d0gJsL9Xh4O73F6NsPZoDwEaFY/ILLxAhVvBUTHGJjEAAgcpHqbrdDqbidksmkdi6NXi9ZUpvaPYUFMbhsaEkY/Fz6gpyR0f0Q+PUdyjfaBLhb+45PErKS6B5hJQ1zs6"
+                                 "7KCJFV9ZnIpLQJKpaDVoamoKbfmHYLYKaVE3s03Ka1myV78iUtzBFFgWVIlCUyju0XGQdhh7w8jWtqTYpl5BI0FSr2pUikkFjIhIROtJ4d+GoAbYu1q2ojd2agAYBagHqhSKQVEfBYVA"
+                                 "NaWbfvk1WQipebrJYXcobFXg5hCyWEfNrjv6KvqMjWEQRwYC6ANHDawIzgf21dkPn29oyVyWqlIepneaX5XNqp0hU+s42S93MEXjtkWvC5tbdaZF9OYLz1eaf7k1M72RIk1W8+nidV3E"
+                                 "IAhJ+q96XTC2M99QP2H7H8MC+IRdcSgEIYXA5SoIX7rs65vqKhF+gnQxJpCwPSGau4lOc528+XK/vk+R+lQhlEjeX8SmQS4Mf92cVXotHmfRelLZzPTNp9vaGg5Ll7EOKXMivOFuge2w"
+                                 "K3bjXrzljuasEznco1cUhl74YUDAOAgqfSYCBib0y2rp/BntK9XeufBC6ePzFRbmaw8VQp6osDBRR5wR5gxtDq/DYq/IaFzLFjnry8KFib9F1hmIj3+G5PFleLDdCj8IrAC5GMzu8AnS"
+                                 "xbFpaecBzhCDiw9LcsSoyUczVnYe4JyQueQenwxQSBwAhQyKzQaIU2VW2C5EeCJRdUGFiAuq8MPCBhTCCHMkKAoY3LQ1FtA6wayJAmVxBiq0cVGA2CxAeQYwRjWd87RcPs2S26dkPo+E"
+                                 "FhuLXUQ6FtO0qG1qEFxHl4DydqeAGYJL1CC4jndafWRxXMrHHwi3O1gMMxrXXukdrzahxz4Jy2ohY6JGN5IA6UWk5Knc+lCKapKuaIvSOChaaEZdNW15YtiaFpqRsXFGKvq1PBV0LZ1v"
+                                 "Q6n1Xa4TE3hWfB0aRcmZ6NImqdArq04t6mVgnzG1fPUV4ygKSbNChHataCUk6GSD5JBGPBKX3P0l9VLwihV+QDy+/PiT+P7L34UONoIcIh3ENvREHEMmgE7GfmSSjsoZ2k1E1ll4hl3o"
+                                 "0pTGcdAEZ0joAuvCD9tR5sv9MVbDEPT8gkVu8owHmtAw+3a+Z8cS3NJMF6neMq/cC8DVtKUpTEpJIuSkqBFh15eSejWCJu6YqfpQi8yAb1NhkN8cQ+OkYi0RuWnnrPuFt7YYyBfeyfQt"
+                                 "uY2mWYhSFuuXPIjpPHpKxEOSJuN8uWcmVrR3MviK6PY+4MbWKDDjJ5dgOoaIELBZmD9mz880QjCIcSdGPj3ZNfcxek76qSlOzfTl4Xb1+DB9fHxd7yYjp8v/YUci5gHcYjDEhjmLcUxb"
+                                 "DZsEE1Qsw8St+Tiy8ySNbrcROZnTX3vB5hBYrNPV67h+FAwo71FbATixYQBFM3FY8BiHnmGIufMq01uScNqFI+KxOAoIHDMFrkeFhsidrhrfp8zMD49MUkqjuJWGRykOFjhCk+v6YZlE"
+                                 "SSNJbgIQxDm0k5Rj/+hCDI1TUjjnQsVqWThbtSSc/dqnsM+NWU1pGe6RlCUOAF45zQ9iuLuvDx+YcZgbNp14iZWeqNOjX2UL0a+yg+hXeYHRr7LR6NcNwVensLwSVVk4KlXI7Ks8cZJB"
+                                 "pNkhgIodV6MvKgRwe1Rrql1mUQLBRKJKQDauBKTB/GMogYitBDKKr1mxi696W4yiJhjuDd4Zm0BvmLEZQ59WGnytE4kQYLt7wo2ezwi+Lt5mtSVq2mxVIpIKmSh0LAFKAPYiDV6vg6nN"
+                                 "iQGr7IXQbIT6fsUQ9MyG4IHGq9N8MBqShy+iKiYc7pIpkwBenNLcUT01JQuI6qlRGrbKSl6wohvvWiVSHT04xgfWupNds+0oyFWuaV72qlZXp5lgodUCk1SdytfSjAhG2V4GhmZkYGyP"
+                                 "upI+4EVJyvYzMGTTZuFXMAODZX4pF/NLuphfpJ5MuQsBI3dBUilcjaPQahu1uD0bNKIk24hSJxhRkmhEQbSKUhGrZICRtEGJQjNMNmBEmM0Wo5cKC0V9t1EISD085baUDtHPg73ElgkB"
+                                 "fYDQTdhqd8JWuxOu2p1w1W7BzmWo3RoVzTzu2hAHv01gpyDdSScK/TYB/Xbg0W4H4EhiGpWyBhcBNxFuV9CojNcXYERYrl2JgpTOV7wicbpo6k61OUIHnHvVh0ppPCWhMnmFhYLccD7g"
+                                 "dxDrvcNyH2tBJNa1yHphO70T6LMqIc1XZZ5J5P1bGzCSbcCoP6wB82SQSlNIFOWh9gmXi0JB6yNX81Jr3LIKCYSQZRX2plxvyvWmXG/Knc2U2xCs0vcszPFrvA9z/Lp+g0eFBU0iHOoy"
+                                 "x1SHjBI+wezwerOjNzt6v0l/2DZ42GIDGlkJFCVdfKKQD2NvT+X/DZgLM+w7YIgOMy7wyAz5DoT2NP7fimmwg+GHBhJqCxEgGU6TWxDRQ4TNmiQQQlMhaRaH31ZkqjGC89QgVWtDzyGa"
+                                 "lQJrWQp7NUZInCEClhrOSg2PLbv8WgyBpcZdYNGw5KwYWmRsIXh11xXBN0kPp9WGCJImY3ALM3a2GFy/Gn43wFUM8mFDZQ9CKusoAhGkrkqubti9jXibGf3JOsIE3oedryl83+FFwXl8"
+                                 "NSXazisH4uFnyCe7ko/02lJT+aetCWtiRHvLAD1B2n1AoovU6puWVYywnifZ8T6Az+hOlrvh2OdPJ3aan8JMO8V0uhgFp0hZMwGYkoGwHGF16KbzXIt59JYlYj4LOYyFVGFSujq45WxQ"
+                                 "wGVOQCjbEeC9GHBXSmNfj5ev6XbggwS9MrWYUCRtmK7ueTWS8Y3ICTLglFuJvv/zXxNkQESqkETFDdoHIYgkF4tQEoHvQ6tjo7ZE61d5/F6AVP7YtrTU9JhFq6dEzKLF02uWDT5fPiSz"
+                                 "Na1OiUBSgGpy3LciR3HK5q/rRDzNpvN5siKgKGHPD4gPgACoBD2iWACVPqGgsqfgIp0OKFcX6GREOemKKCex0R2jgH4u/KChJZ2OSydPw6WDZtgVmM6Viwk46XiaHoM7EA+WDUOpwEoV"
+                                 "WXEw88xvRo6gedINNM9cWIKNmif5qHlmEGoWbJ50g80DJXDHzZOUKAUIJQrz/jeEElW4mxx6KWA5FX40A+t06MSGvXQSwhO5l/3xOt38M3rP8FH3f85V0CN6lwloJ1WFxIczrtGcPqLm"
+                                 "76HGu4Ian0831nk0222N/G/hZ7Vfjj5yFUhV2SxmMCGnkiVFQbZiDAsyvHk3fjuJYH34UR9+1IdJ92HSfeRWHybdh0n3YdLkMOmavbKeR5uLixZSjmKhBp4PGE1SB1Qg1sOMVIJMiu9g"
+                                 "NvLMbgwCNILGRp5ZkVo6IMeGIZMofyP2aXCzoWIE2eTPrQMKY/jxi9RJ/mYV0mt9VJ2wOVE2BcMRG9O+DnMXOMDcVTxMdYHI7iWA1OJcAjbUe76hwvfyFUD8QbEgyFcEXhVq5GKgiRcD"
+                                 "IxiX1wYYl/mZoI0rgtfBFcHr4orgdXdF8ByvCCY6Z/ubUTB9wi252KDF7nVnsXvdWOxe+xa7143F7nVnsXutWuyaa3+zDXbdnP3tnWp/ewz7GzYXLgtVszcCvgkj4Bs9yZTTSab7k6z5"
+                                 "k+w0na/J7y3L5WI9WaYbBfo8nU/Fs7rJn0T3W2JbcIb0cjhBKYwvT3UBCrkYNWaEHBb8RQovaRrw81HwipMy8OxJOoY6kRV6WiSOqX9jXcfqVxspXl7NNvrtNprquVgls+nTJJ0unrZl"
+                                 "gbX34Sob4IerLz/+FHij/R8hWM4D+GJ3H6WnNjw2/9I5re8Nvd0f4eaPj1kPHyWV3ecNk896y+CQFGkn+1FTGlbmY/YSzaPflkqsX1+2oXxVl0XoEQPvLQlAxgwk5aFuQwODg2JrXsbK"
+                                 "NL0+TJfqMRonwn/IF00JcZZUUeajjxatGZqDIsg2yGcNtx/GoR0hXlK0t2FF4nm6hs10rRJkLLutiBEpjCgz1rExGbOBxcHCFzsLv96t1OgJsVsp42gRrX4TMuYXNKo2zO1o2HqqN/Wz"
+                                 "1QWdtPWmm29rGsAkStNkFS/fRZquxfx1lk5n0yxKeNZujaaHp/ev65do9YzNvTpr1aX99CzX8+VavKySh+k43ZghQsVFS4R/Y2DY/3g0K1INNUZDnhCCx2g2izfb4JryjU/wMXIchpQY"
+                                 "XpCEHukFP9I3fu0RTv444XIfES/jKRZk7NvJoHEx0E+4YCam9ud24YAMfl1jIkgOB0gESVRBqyRaLxdSDOOWoK6e8OujKUYGvj+aKATfRw/QKYZvv2VvhduOZXsQ3PZrlUrRdzl90zoi"
+                                 "ELXscxcufnDB9oMjc9UcShDIHjPyj80VrTkmfWBrr4jt1/R4W8eYm419thSDZxGvE66iB0gVl/TXhK7bUVLFJxXz6P0XpGvNpVdWesOxpHZmMflYcvaGW1LxTjOHY0MCQKgafhK35Lo1"
+                                 "cTYL59dwJ0PXzWTl2p6sU4l/yrAPDbaG22/CPEHqYCGCLMa+bF3nWZKXWtN6cL9d6j1YAhywLkCW05BpxCsR9tqy15a9tuzavOtVnZuRl66ixfoxWRX8n1jW/xGcgoKOseV/6994Nx6K"
+                                 "hvEJXpht9ORbB+U325VhUE319N3dT1c/7BzthpEdmzXdKT7GZvu8s6/Ju8aWyp11VTbXVxbAfoVBPxw7PDZrulN8kC30iYAgVPrMWjXcpWWUjfa4Q2CyjTJv1nSnlnE216ey7MasQXMd"
+                                 "GYbVXD/2ETXalXFMzfVE2HOqyR2gKHuuyR6//PjT1fdf/n6VPcpcHYA8rrZAHlcGtJCjPDQWXQqLz93ZZf3ncvW8TqOsm5NmF+LTudjseW5FasgwB2EnpCLAs8s9PCalofJvJKmhL4kc"
+                                 "NVXGICQ2HPnUUfsBeX48QktFnUlFHU6eoOiTu6YIqalCaqqQmtx3SO07pPYdEvo+ZjUrWjvLIj+084kFCnxiv35Ia6c1rd2A2m5Ia2fZWIe3I4p8ishPE/lpIr+QyC+08ysWVzWvmEJL"
+                                 "ZDeDKn3nI4aDcxsI8+gicM3Z+dxmrNsJ7uqWI97cPdxQcgglWIfkFG8ImIYVJac6jJJT3UTJqTai5DpKDhJO+af9o0CjjwLlY2ISrebLxfR3DIgZh4jFIrE5eMlgsk/yl+VqnORomXAl"
+                                 "MFO2gBmVlgUjy06xg1BPSeuvgA+a5xJ8fIg207A5tCMcdnRg/7b7QkBSLJL5Ml0tF2IRLZYijMXbufFFusIiZCL8nQ1vzevx1i4Wb629nFdOCCMfmcwxr7aFuEqaXnqbWVSTZyvCIV3q"
+                                 "npDsvVqhC5Lhds9dTk54svi0rqPHJP1NPL1Gq4d8bv12roGg2veoiBKMUtlep1i1XhdYtZpyLvVAVD0QFbbKmkawAugY/SHguJ4jOK7HBsf1vhljrYfa6qG2WofaatcEbTdRp53MTmCU"
+                                 "rcJ74ebb6yxdRUIFPmQVh+QQ75CN9hRyNV3opOlCF/UTMtQPvUxhbc+GLtuPXNyw8s1V/s1XSbqaJlktGN/z5iKZx8lD6cNTcFwyu1RkdqnQ+/OUQxSyiJ6ITWMEjARomnvIJ/Hc54gC"
+                                 "EIUkmv23I3YBq2eg9UwT2WJwEqamIQOiB1thQbbCVskqWjyLN8VaYuTiKFu35lWtqh8I62HyxdZZTBdp6MoiNEihWCxAKWwsmMA/ZUKgRwshHwdoR3iIxb3audAZICk4i9CBw95XQzaO"
+                                 "IeKQR8sFQyqSAR/JSsaFUqoSnuAv8gv+ogzGS+gRZG+c1QH0jUGKdu2c6fE+e7zP1p4yeGCcNOVzE8CxqF6hBLvJUz1QhIZ5wQyf0DCPEByVqr+DlYdBmiOw4OGkNlhTwwGMRWgjkTB8"
+                                 "IVQEthppZ57Tw9dVyt4uH7R5RgtxCsGA1dICFlorsuJ7FPZ55OmQ0jIfnERa4iWed7KzapRUdqL2nOBKrXtMvMQD+z5D0C6xWjXkbVk8lk2om9a+4XI25F1fPKZPk+mo906QD1AcmHxH"
+                                 "0/80WQvyFWrmcmRtdy4d5CNpx+aWFqxNO19BsLJuRQzWh6idC52vB+zYwcd3hAylMD4cOJ6VMU/i2knmtDCww64pKWtnI4sZdGwdjqytG1TGiJvKvxmU74/GxKiMqzh4wW7T5D3ddvAw"
+                                 "XTzdzqI0WaeUhClQxtxrC0upbvSlSPk2O05m0bN1lXm2rjDn2DFLDSZpbUR23xkk2l0XAn2yebVLDbsUKLwMebI661f/cYBl+E/SZNWIziVoeIlyUpfcXXffmLjoOpPI7riuyVYhOY+Q"
+                                 "4UXKiDjfYfEICfaNCxZekFzU3Xnf1VYg7s2u5PmsSdOzadaJMPCjCyDOpmGXAoWXIQ8dOcI2g40gSHQ7pPCiRwTY+fV4ep17+VrK9HFM4DGFW0tqyHSJAnv/dg5HdcsBcsi3YeezOAfu"
+                                 "Ob0Pz6Onl2nS13ExT83vyWqZ1XbrpyWblvfpIhGFelfqUO+KWgxtc0v4iVQ/5rNutrTZpuE/wPJI5gCr3Zjjxeo4UoL0eT0vQrt7kkj76SC0O1TGIrTNJo7Q7IRpW6fZWhFvy+k46eeP"
+                                 "M3/Lh2QmHldJIjb/tYihWg1E5QGbzqLVUyJmUabqN3/k3axtxlW9vOO5+u523HfWKb9rvW/TpHfWe8dj31xXhZ8YJ37XpKXePVvfXps9mya9tb4tsA7VC5L41KUg4fkFqYZNnVUOfSFy"
+                                 "XMB3mb/jm6VbSQoPupchib4YSc76dco1rvEYZpCgO8HsCuaMcl3gfFE2/nkkq0M1XZhk6mIlu4SvWS4MYFr5d23rrjuq8dGtJBcxJ4T935kshH3VtSz6gmQ58zfyydvZ70YUwnbuSBLS"
+                                 "JupIFsKx2bUs6oJkOes3quEtWq9/FYouZSNMWMfSFWJZtE0qQixLk/KElyMP4eQ6j0RnnyO7P7Tcsl1ZaA7Ctj2V91QHYUeCWA/1LuXQFyLHBXwXilbpQBJRLJpkm5YOFAr9UOpWHuLn"
+                                 "aluiDKv5+y9/3+I1H+K/xDb+S1QCyUzC0hhdwEgIE3++sfzji02pbFs03nf5Vf4Qf+cf0pb6NJt/oyySi83OsN+d+/yMP0buw8VFrf8bR4kTdtVFxYkXjqcsQBwKDA8pCCuHhsdk50ME"
+                                 "qimY3NdE+BZfV/APCJgOXIAWzQJoKeAdEHBQZHWwNCSXyrDLKfJAKrwBh6A0G7Z2hS59z4otQJkAXS2VZ5c6m9uQCgijyrnmIJoKTOSBCer8ZH/pt5TsX2HsziwvZ8fEzck+AlbJz1Ic"
+                                 "qLBvS3HsyPbFAXN2n8kVMKdQEJQLmFPRj2I5X0yF78Ui8uNdIb2NwkXVJrCNqoAWOB7TcRK1Bys/ws7Pxx7aRTFuE7TUJGEBHJCKTlkAvmIvADzCYs+sWJUP2T2GB6cjl3GRy1gx1mRI"
+                                 "XJP1+7QOSFfz0twddcXPJtbEW3+JdQHMuvCDuqkQzKmBf35oKFU/ti8KGkrT4ZaagoY68VxDzKaLhLSyWm4NTh/R3oDNufPjOen6B70EiKnwQhCmlGTZsSwr8lJMVYN1eTKS1NDVAkZP"
+                                 "ni3uoVSZLSdVDB1AG81DvJ1Ky/c9KuuBz7/H4gchbG9UFW1ekF5SKpkHtCvigNOODl2q97ISqnKXxmRnHdr3YLkd6ZZa2LahR93glYvB0aJFjn7zVy5saq1gtDXjhlWaUo08P64Dt0tA"
+                                 "YdW7XwIKorreAgur64RbYEVtiPR1FeduM5ei5LxyRahM26IwQZDJFAQxVBZGBh7sHiEfGRtRi+uWuT6zyQ81uvBB2FgS42xweoAxNt/qaglj0h/ZnUj4Ah0hO9tOnY9ixKCGMlSAEVjG"
+                                 "j4b6ox+bzqY+IS5c6hNju6hbv4qW5Hs+OBVjup8AmgOjg6ASl5gTAWsD9MnWg9FQcmVVmXlTYPaMzgmYlOPeKHAAh03W0zeBiJezVCQ6FlnVQsC68xXqFbMa2iQBxstFmizSXclVEFV7"
+                                 "QD5SdbXquhwcjlRj0XJD4fYCC+qpvAsFAHiYi87Us4QlAILuTOiiLou8WK5AiciDQa6ASULlkejiSCgKChrC2Nx9HgMltb7LlUsCS4JV8iwx0fhKwhCUsMBriMURh4as6UA+xnI+9ajU"
+                                 "ggDByYQEPWeQHKkttyPevfcDhAVAHuTewvUjA5005EYGOBNKIpYU7Gz6NEmz95f9iwzoRR6gbydFlW99rT7wgj3ShvfGgic5oL52B9Qr6PGORaqEcmhomZETnruni7T4PGBrqOyiVxqS"
+                                 "5mVLk3slNfVmXkJrt7fkPDbnTiLSW/ahJejuoiK6K3KhE2X32DHNisHA9bIP8Gjkwc+rn/IkzT4YnOgu2CiprcMgg1gvuhrRaTSkkZlnzQzNiL6s2juBbCdaZ+Qcd8zI4pGwZ+POYTrK"
+                                 "BhixG9+tG/HPH5hkiH0VUsTEkuJIS/EeTICXdgrO6Jgv1IqKnHbYr9F6JdbpKonmxaCODuAbQy56Y8gFb3RA+yxDx2bOzje1UWQoeKxHBY+1lqeWrVQzdHDQxliyPk7yhA9EEygUhwIc"
+                                 "Co2G1g/uoEbueTlFdssEay7j90uATlHouqkeKVwqOgp2RceM6GU8TZABEakUiYr18uBSCjL/oOi8Gaqn4/OGEPF0XIVAUQhW6bt4WS3F4FnEa/jzgHdXlFQ5kULbnUvM7vlXbLySRgoL"
+                                 "TSEW8+j9F6RzzaCHJdDk4285XnVdHGljfiTrzJq5nc6ztLONCOfI1XIXo9FCSO5i5Dlfd6tonBQzLbIb2XgyfflwtX4dT66i9dWu+SE57Gr92zpN5mt6YtkpnbQ4/EbTz9wFaT3B60TR"
+                                 "mk7rOkGcJgvGuIvRWFmWU0RoMK3NXYwLS2bjDgQ5014y2mSWzJNFuhZv/plOt2X8P8k4FQ9JuvlX9h/Oesg5StPSWecozTd25DnPQksnn6M8HR6Ap0jY3jnoKlU7x6GjNC2cis6StHI4"
+                                 "OkpzsWckazzoUblaJ5sL4I0HP9zUInMKvl/XyBzIfcyNzDnw4EbmQC5Oy9vbnYEJObbFEBwCeelswSGoRPQwjVqkBeQpIkZa0OMhrO4ZM+d/LlfP6zTK2NrYS7IPJI3iWVabZ/U6Tl9X"
+                                 "m+0ge4uxtxh7i7G3GHuLsbcYe4sxPyzfthA8v0QiCcRbIF5ipSfq+F5OKTgY7Z/zxK5MKZkoK6MqtAsRr6cnYtP8YXISz30O/9LDKbH54fHT3n6myQ29NaWpfQUEE+mwAi7tY8Y2rdrE"
+                                 "dy8ThW2sFfhBGmqteMwVh3njyxB/BTcv2I2FFT0nSSq8m0Es0geHmrXVhvk1FY66qDf1s5qd0DjqTTeXrGvCQKSQsRinY5EsxOu6sRgufvVdTqQKJ6KBPAmrxSLtyzRjU5QtkXzRJ+sW"
+                                 "58XW+du0jQ1n6/X3iRgvzjjqTf/pr531/+tkus5CsLdIvtunLmrHsYJnfOTJa+IJacj+5i393aiWL8kimt4+vaRiuV7nUeVH+2JXnCVjNlT1KPx6ZCZE4HsJkwAOaDMQwFvbRMDuIWYS"
+                                 "6IKj9fCDShvyOrP7RHFaJHbKRGDG5jLRFrS2MUUKoCWkVBporZhqNdqwjNpB+4SjATWPZ0ekanADhKFlRIE5I2fXMk/PCkgJa4bcpwIzn4ChhjII99lTAB4qSYJwPxxCTgq4T7hAH8VP"
+                                 "6/NydwC9Wgamqwt4JmS6qiAYvlXTHeaJiaPKyC8CC68qoDzzp8m3sSLN1IWg8lUFb2YGmxcQUEkXiBtYFRaezTMIaNB1RyAjVC9bLVqQUjEoy2pcUyGRKuPBTGIDUGZx/u1WgIRgsuGP"
+                                 "Q8TmK8yVJFkKqp67S0AwIaqAkGqrhOg5CBoKHyjW7h7uT3KgxuofBvdUoOv7QHmK3XFgQrQ7fvk1WeT/8IXyg1hESsUi8/xkW3HDHqgYlC1X3NMBMpwutm/3QgXe0I39h7w9QmDYnAV5"
+                                 "/F3y87ZfKDRDjbGOkfyrselqbQ4gMUk6Xj4kK7FI3nOP6DVW3xlXaJ+42Yn3EusCc4TdS/RreIZZhHrAvzd3fYgCsowiftoijWbRQMl1FBJqLx4yFiTn7V7h3zCw7ijFJXDZgtmS3ijN"
+                                 "LYD9XivU17hirHHGrjhtkau2F7m6sEXe7vKzLI50Ml087/LgewX4LSjAC9NmtfV3E2yuIioDSfFgPGbtk/GYNaulBeCwBsg8IHDPkZeHnIYkWOgCWnNIRGEeMtoZPi+huXH+jii8Ia1c"
+                                 "kB+yywUpn4jx7FOLHBWRmwMqgJMOqPhLakDBnDq05GBO5e4H9k2qssrpF6nqRDHRm2pMRvzbGIC0sxeFXabl8Og3ko4wpg5bBVKJ/miYqcRhTSVua39QNYz0fFZLkkosVKMg7mnpaU5D"
+                                 "mjrKpA6GtJ0fDB12vtKKXL9BKzvgbx3xTWkyOJw/JG+MmhIZkNXNwEXd+EPaY09dohO2eZGL2zYvGgKu+xxds8SNPhCquMXR2vDYfqG0C43BDmyL/RN2F6UQhIw7QZ3AbOGzDHaYv83A"
+                                 "Z7kRCiQhw1YnXvIrBKGD4T0QuacQRlA9HdyrYrlS2inKUjXnrKFLj0SwgyCkY7OV7q+Ke3+VrTtDJH0/gLfXEdMz24q3RTrcqB38g7KLS7hkX8LZHkLZxa093J9cltxYjeTGIpV5CbUl"
+                                 "HdJkm8h2JXlKaTyM+ojB4jQpLJCIruj6e14MdP0Kr9r0uLMCxshC/W8gwfnuEwEaksjDAv3ILiNwnBOyAb1nAnwkNg/w69C5mGobQBiSSN1dAz8jlCWJncaz/O3BpzArIy6nhROSba8c"
+                                 "s+2r3IxGDZcZtNgxk8dUGwKC4LSVwznyMcJ/0tmAg2HUqlBuWAYUs4Dp1nJnAYFREspuGD7oMd678MPCx4hLSmcDr056CQ/lBixxSOgNnVnwqoCU7LdCFZDCj1M6qQ+k+T6gdcfv5TQo"
+                                 "D0thBWonRgjahvqwAM6aSn2vx7H03m9ns2ge+TdSpL+9TJbLhRJhOewAdDZIqrOBUu4ER6KPwCghaXjxiNA7PkYRK6wPC+Y4Iw4DRByXTUKnT9CZsuBsM7whYIKkbBTKW+GjCOwUiouT"
+                                 "zemCHgG0y38ERmHBuzafNjiF5mJqc4QignDvtUoaxdPZNP0tmuZ/zxLxMH18fF1P9yWhsiS/3BexBxi6Nrkyj60sABFv0/VrNBNPeZyxBeLigF1jSscutGqw6zvEyjt2e0eBPWF1mfxl"
+                                 "uRonOQ6H9kaW3quNWxIk8EK6IHnj1gQZcQRpdkbuSVvgvoUtUOgZH3obHWOIbcdeKfA2Dj3iw2y6wwLuTY558/EhurpLFskqQixDEDIHIm1HSBrMT9gByk9zAyhg7DUwCohbU0M5HJzJ"
+                                 "y+PrQuTnZvKyOSuH4nEWrSdQUMnJ73O8p2lKCahaFATxbVBzX5l1S6/Mji9FvEeZ2lcOnD9ypXBYd6uBHqjAD0auDYoYjRy2E43sFtwAidRc+LJbNIRL6DI4jjPnezgGavBDpMF1dZYU"
+                                 "EdfokXW6HD/PN/eX419Cic2Sxv07zbhtQP1k9+9otn8npPh3MoqvGfDa1x1aW00wHAc6RipWEn1D+jJ8Q0+GYWgKiWYXyZOcThhl9TJfzNd9ETpgPMbqdV/hqndMOk7VO2Bhk9xxoXOh"
+                                 "PKo7TlN7+LrFzINGYqiSV6IKqbX1vkKF5SSDSJN6QncDycmoL8PJmC/M4ixXRhLTqDS16N9XCDtRMog4lQIBFU3xUmouQUisLZhdB7/G++vg1/UbvCMM1fpwDiGx3h/Eob5TXBhoqwQ7"
+                                 "i2KfcDiPxpu/kvXt5uesWIi3lA0zHJFTbIYjGLDpAyU6P4cjKCdEHE9CSj32AwNphoyCY7IK3fNxCfL+wlNe6g8cdiMw24TYFxTreTSbAeAijAsZODscbBEwTC1EwsHoAWWKweHuE78G"
+                                 "LxwopZBAKU44TegWTlPYWcz4FZCSHPUBU8foYnyfRsv59HY+nS+zwtW5I0Qk7y/JappVPSvgobaVRNFOTsQd2sUg1I1nUYTN44K43jh/j6ZiuXq6fZrNRVD5ePSPQvP+nJaz4TakGwWs"
+                                 "SDUY0fLltg3Zp9xBXqkl9UCVlRw6A6ZPjUpScBOLCayWtMVaU8/llM3lGwau8D/HSfQDW+ok+OX9qp/2QjSNxEKNLUkwLFXT/U6TRUwL6DQ06AVO1//3/5pgbhU=")}
+# END NIM SNAPSHOT
+
+
+def nim_snapshot():
+    """The built-in copy of NVIDIA's NIM profiles: {resourceId: [profile]}, with the date it was read."""
+    if not NIM_PROFILE_SNAPSHOT.get("data"):
+        return {}
+    raw = json.loads(zlib.decompress(base64.b64decode(NIM_PROFILE_SNAPSHOT["data"])).decode())
+    keys = ("gpu", "precision", "tp", "pp", "min_vram", "lora", "device", "tested", "doc_gpus", "doc")
+    return {rid: [dict(zip(keys, row)) for row in rows] for rid, rows in raw.items()}
+
+
+def sizes_anything(profiles):
+    """Whether NVIDIA's profiles say anything about GPUs: a GPU model or a memory floor. Many retrieval NIMs list only precisions."""
+    return any((p.get("gpu") and re.search(r"\d", p["gpu"])) or p.get("min_vram") for p in profiles)
+
+
+def support_matrix_rows(page, name):
+    """Profiles from one model's section of an NVIDIA NIM support matrix: its requirement rows (GPUs, GPU Memory, Precision), each with
+    the GPUs the same section lists as supported at that precision. The section is the one the page's model table names for this NIM,
+    or whose heading has exactly the NIM's name words."""
+    norm = name.lower().replace("_", ".")
+    want = set(name_tokens(norm))
+    display = set()
+    for tb in page.get("tables") or []:
+        hdr = [c.strip().lower() for c in (tb["rows"][0] if tb.get("rows") else [])]
+        idx = next((i for i, h in enumerate(hdr) if "model id" in h), None)
+        if idx is None:
+            continue
+        for r in tb["rows"][1:]:
+            if len(r) > idx and r[idx].strip().rsplit("/", 1)[-1].lower().replace("_", ".") == norm:
+                display.add(r[0].strip().lower())
+
+    def mine(tb):
+        path = tb.get("path") or ""
+        heads = [h for h in (path.split(" / ") if isinstance(path, str) else list(path)) + [tb.get("head") or ""] if h]
+        return any(h.strip().lower() in display or set(name_tokens(h)) == want for h in heads)
+
+    precs = lambda cell: re.findall(r"nvfp4|mxfp4|fp\d+|bf16|int\d+", (cell or "").lower())  # noqa: E731
+    gpus, need, specific = {}, [], []
+    for tb in page.get("tables") or []:
+        if not tb.get("rows") or not mine(tb):
+            continue
+        hdr = [c.strip().lower() for c in tb["rows"][0]]
+        if "tp" in hdr and "gpu" in hdr and "precision" in hdr:
+            # an optimized configuration NVIDIA lists: this GPU, this many of them, this precision
+            ti, gi_, pi = hdr.index("tp"), hdr.index("gpu"), hdr.index("precision")
+            li = hdr.index("lora") if "lora" in hdr else None
+            for r in tb["rows"][1:]:
+                if len(r) > max(ti, gi_, pi) and re.fullmatch(r"\d+", r[ti].strip()) and r[gi_].strip():
+                    for p in precs(r[pi]):
+                        specific.append({"gpu": r[gi_].strip(), "precision": p, "tp": int(r[ti]), "pp": 1, "min_vram": None,
+                                         "lora": li is not None and len(r) > li and r[li].strip().lower() == "yes", "device": None, "tested": [],
+                                         "doc_gpus": [r[gi_].strip()], "doc": page.get("url")})
+            continue
+        if hdr and hdr[0] == "gpu" and "precision" in hdr:
+            pi = hdr.index("precision")
+            for r in tb["rows"][1:]:
+                for p in precs(r[pi] if len(r) > pi else ""):
+                    gpus.setdefault(p, []).append(r[0].strip())
+        mi = next((i for i, h in enumerate(hdr) if "gpu memory" in h), None)
+        gi = next((i for i, h in enumerate(hdr) if h.startswith("gpu")), None)
+        pi = next((i for i, h in enumerate(hdr) if "precision" in h), None)
+        if mi is None or gi is None or pi is None:
+            continue
+        for r in tb["rows"][1:]:
+            if len(r) <= max(mi, gi, pi):
+                continue
+            mem, cell = first_num(r[mi]), r[gi].strip()
+            # 'Any (single) NVIDIA GPU with sufficient memory' is one GPU; a bare number is that many
+            count = 1 if re.match(r"any\b", cell, re.I) or re.search(r"\bsingle\b", cell, re.I) else (int(cell) if re.fullmatch(r"\d+", cell) else None)
+            if mem and count:
+                for p in precs(r[pi]):
+                    need.append((p, count, mem))
+    if need or specific:
+        return [{"gpu": None, "precision": p, "tp": n, "pp": 1, "min_vram": round(mem / n, 2), "lora": False, "device": None, "tested": [],
+                 "doc_gpus": gpus.get(p) or [], "doc": page.get("url")} for p, n, mem in need] + specific
+    # a section that only lists supported GPUs, one per row: one copy on one of those GPUs
+    return [{"gpu": n, "precision": p, "tp": 1, "pp": 1, "min_vram": None, "lora": False, "device": None, "tested": [], "doc_gpus": [n],
+             "doc": page.get("url")} for p, names in gpus.items() for n in names]
+
+
+def nim_doc_profiles(ctx, s, rid, refresh=False):
+    """(profiles, source) from NVIDIA's NIM support matrix: the documentation its NGC container record links (read with the NGC key),
+    then the GPUF_NIM_SUPPORT_PAGE beside it. Without a key, the copy in the built-in snapshot when it has one."""
+    key, where = ngc_key(ctx)
+    if not key:
+        snap = [p for p in (nim_snapshot().get(rid) or []) if p.get("doc")] if NIM_SNAPSHOT == "on" else []
+        if snap:
+            return snap, f"NVIDIA's NIM support matrix {snap[0]['doc']}, as in the built-in snapshot read {NIM_PROFILE_SNAPSHOT['read']}"
+        return [], "NVIDIA's NIM support matrix is found through the NIM's NGC record, which needs an NGC key (GPUF_NGC_API_KEY)"
+    org, team, name = rid.split("/")
+    url = f"{NGC_API}/org/{org}/team/{team}/repos/{name}"
+    s.say(f"NGC catalog, with the NGC key from {where} (its value is never recorded): GET {url} for the NIM's documentation")
+    try:
+        st, body, _, _ = web_get(ctx, url, headers={"Authorization": "Bearer " + key})
+    except OSError as e:
+        return [], f"NGC could not be reached for {rid}'s record ({type(e).__name__})"
+    if st != 200:
+        return [], f"NGC did not return {rid}'s record (HTTP {st})"
+    links = re.findall(r"https://docs\.nvidia\.com/nim/[^\s)\]\"'<>]+", (json.loads(body).get("description") or ""))
+    if not links:
+        return [], f"{rid}'s NGC record links no NVIDIA NIM documentation"
+    page_url = urllib.parse.urljoin(links[0], NIM_SUPPORT_PAGE)
+    try:
+        page = read_page(ctx, s, page_url, refresh)
+    except PageError as e:
+        return [], f"NVIDIA's NIM support matrix {page_url} could not be read ({e.why})"
+    rows = support_matrix_rows(page, name)
+    if not rows:
+        return [], f"NVIDIA's NIM support matrix {page_url} has no GPU memory row for {name} (it documents the current version)"
+    return rows, f"NVIDIA's NIM support matrix {page_url}"
+
+
+def nim_profiles(ctx, s, rid, refresh=False):
+    """(profiles, source) for one NIM: NVIDIA's NIM Metadata API for GPUF_NIM_TAG (no key needed); NVIDIA's NIM support matrix when the
+    metadata is missing or names no GPU and no memory; the built-in snapshot when the API cannot be reached and GPUF_NIM_SNAPSHOT is on;
+    ([], why) when NVIDIA publishes nothing that sizes it."""
+    path = ctx.cache_path("nim-" + safe_name(rid, NIM_TAG, limit=100))
+    cur = load_json(path, {})
+    if cur.get("v") == 2 and from_cache(s, path, cur, DOCS_TTL_S, refresh):
+        return cur["profiles"], cur["source"]
+    url = f"{NGC_API}/nim/metadata?" + urllib.parse.urlencode({"resourceId": rid, "tag": NIM_TAG})
+    s.say(f"NVIDIA NIM Metadata API, open, no key sent: GET {url}")
+    try:
+        st, body, _, _ = web_get(ctx, url)
+    except OSError as e:
+        st, body = 0, f"{type(e).__name__}: {e}".encode()
+    if st == 200:
+        profiles = [nim_profile(p) for p in json.loads(body).get("profiles") or []]
+        src = f"NVIDIA NIM Metadata API, {rid}:{NIM_TAG}, read {iso()}"
+    elif st == 404:
+        profiles = []
+        src = f"NVIDIA publishes no profile metadata for {rid}:{NIM_TAG} (its NIM Metadata API answered 404, as it does for NIMs released before it existed)"
+    else:
+        snap = nim_snapshot().get(rid) if NIM_SNAPSHOT == "on" else None
+        if snap is not None:
+            s.say(f"NIM Metadata API unavailable (HTTP {st}); using the built-in snapshot read {NIM_PROFILE_SNAPSHOT['read']}", "y")
+            return snap, f"built-in snapshot of NVIDIA's NIM profiles, read {NIM_PROFILE_SNAPSHOT['read']} (the live API answered HTTP {st})"
+        return [], f"NVIDIA's NIM Metadata API could not be read (HTTP {st}) and the built-in snapshot has no entry for {rid}"
+    if not sizes_anything(profiles):
+        doc, why = nim_doc_profiles(ctx, s, rid, refresh)
+        if doc:
+            profiles = doc
+            src += ("; it names no GPU or memory" if st == 200 else "") + f"; sized by {why}"
+        else:
+            if profiles:
+                src += f"; its {len(profiles)} profile(s) name no GPU and no GPU memory"
+            profiles = []
+            src += f"; {why}"
+    atomic_json(path, {"v": 2, "fetched": now(), "profiles": profiles, "source": src}, 0o644)
+    return profiles, src
+
+
+def nim_card_minimum(ctx, s, rid):
+    """The minimum GPUs NVIDIA states on a NIM's model card ('8x H100-80GB'), read with an NGC key; None without one or when not stated."""
+    key, where = ngc_key(ctx)
+    if not key:
+        return None
+    _, team, name = rid.split("/")
+    url = f"{NGC_API}/org/nim/team/{team}/models/{name}"
+    s.say(f"NGC catalog, with the NGC key from {where} (its value is never recorded): GET {url}")
+    try:
+        st, body, _, _ = web_get(ctx, url, headers={"Authorization": "Bearer " + key})
+    except OSError:
+        return None
+    if st != 200:
+        return None
+    desc = (json.loads(body).get("model") or {}).get("description") or ""
+    m = re.search(r"\*\*Minimum GPU Requirement\*\*\s*\|\s*([^|\n]+)", desc)
+    return m.group(1).strip() if m else None
+
+
+def nim_gpu_matches(gpu, accel, cat):
+    """Whether a GPU-specific NIM profile ('NVIDIA-H100-80GB-HBM3', 'h200, l40s') targets this Google Cloud GPU. A profile that names no
+    GPU model (generic, any) applies to every GPU with the memory it needs. Matching is by name: NVIDIA's name must start with the GPU's
+    model and add nothing but what Google's own GPU table says about that GPU (its memory, memory type, architecture)."""
+    if not gpu:
+        return True
+    a = cat["accels"].get(accel) or {}
+    g = gpu_fact(a.get("label"))
+    mine, mem = split_memory(name_tokens((g or {}).get("model") or a.get("label")))
+    mem = mem or (int(a["mem_gb"]) if a.get("mem_gb") else None)
+    full = ((PUBLISHED["facts"] or {}).get("gpu_names") or {}).get(accel) or []
+    allowed = set(name_tokens(" ".join([str(v) for v in (g or {}).values() if isinstance(v, str)] + full)))
+    for name in re.split(r"\s*,\s*", gpu):
+        if not re.search(r"\d", name):
+            return True
+        theirs, tmem = split_memory(name_tokens(name.replace("_", "-")))
+        if theirs[:len(mine)] != mine:
+            continue
+        if tmem and mem and tmem != mem:
+            continue
+        if set(theirs[len(mine):]) <= allowed:
+            return True
+    return False
+
+
+def nim_fit(ctx, nim, profiles, precision, context, info=None):
+    """Where a NIM runs on GKE or a VM: for each Google Cloud GPU, the NVIDIA profiles validated on it (or, when none is, those whose memory
+    floor it meets), on every machine type of that GPU that holds one or more whole copies (GKE places one pod per copy, each with its own
+    GPUs). One row per machine type and profile; best_per_shape keeps the profile that needs the fewest GPUs for the demand."""
+    rows, notes, cat = [], [], ctx.catalog
+    use = [p for p in profiles if not precision or (p.get("precision") or "") == precision]
+    if not use:
+        return [], [f"NVIDIA publishes no {precision or ''} profile for {nim}".replace("  ", " ")]
+    named = sorted({p["gpu"] for p in use if p.get("gpu") and re.search(r"\d", p["gpu"])})
+    matched = set()
+    names = pci_names(profiles)
+    archs = validated_archs(use, cat, names)
+    for acc, a in cat["accels"].items():
+        fits = []
+        for p in use:
+            if p.get("gpu") and re.search(r"\d", p["gpu"]):
+                if not nim_gpu_matches(p["gpu"], acc, cat):
+                    continue
+                matched.add(p["gpu"])
+            if p.get("min_vram") and (not a.get("mem_gb") or a["mem_gb"] + 1e-6 < p["min_vram"]):
+                continue
+            if not p.get("min_vram") and not (p.get("gpu") and re.search(r"\d", p["gpu"])):
+                # a generic profile with no memory floor says nothing about this GPU
+                continue
+            fits.append(p)
+        if not fits:
+            continue
+        # profiles NVIDIA validated on this GPU replace those that only meet its memory floor
+        ok = [p for p in fits if nim_validated(p, acc, cat, names)]
+        cands = {}
+        for p in (ok or fits):
+            k = (p["tp"], p["pp"])
+            if k not in cands or (not (p.get("gpu") and re.search(r"\d", p["gpu"])), p["lora"]) < (
+                    not (cands[k].get("gpu") and re.search(r"\d", cands[k]["gpu"])), cands[k]["lora"]):
+                cands[k] = p
+        for best in cands.values():
+            need = best["tp"] * best["pp"]
+            for sname in a["shapes"]:
+                s = cat["shapes"][sname]
+                if s.get("fraction", 1.0) < 1.0 or s["gpus"] < need:
+                    continue
+                cfg = {"tp": best["tp"], "pp": best["pp"]}
+                r = {"accel": acc, "label": a["label"], "shape": sname, "gpus_vm": s["gpus"], "per_copy": need, "copies_vm": int(s["gpus"] // need),
+                     "mem_gb": a.get("mem_gb"), "vcpus": s["vcpus"], "mem_gib": s["mem_gib"], "tested": bool(ok), "validated": bool(ok),
+                     "mark": "validated by NVIDIA on this GPU", "capacity": None, "cfg": cfg, "profile": best,
+                     "basis": (f"NIM {best.get('precision')} TP {best['tp']}" + (f" x PP {best['pp']}" if best["pp"] > 1 else "")
+                               + (f" for {best['gpu']}" if best.get("gpu") else (f", >= {best['min_vram']:g} GB/GPU" if best.get("min_vram") else ""))
+                               + ("; validated on this GPU" if ok else "; memory floor only, not validated on this GPU")
+                               + (f"; NVIDIA validated {best.get('precision')} only on {', '.join(sorted(archs[best.get('precision')]))}"
+                                  if not ok and archs.get(best.get("precision")) and a.get("arch") not in archs[best.get("precision")] else ""))}
+                if info:
+                    r["capacity"], r["why"] = copy_capacity(info, a.get("mem_gb"), need, context, cfg)
+                rows.append(r)
+    missed = [g for g in named if g not in matched]
+    if missed:
+        notes.append(f"NVIDIA also publishes profiles for {', '.join(missed[:6])}{' and more' if len(missed) > 6 else ''}, which match no Google Cloud GPU "
+                     f"by name; the profiles that name no GPU still apply by memory")
+    return [r for r in rows if r["capacity"] != 0], notes
+
+
+def best_per_shape(rows):
+    """One row per machine type: the NIM profile that serves the demand with the fewest GPUs in total, then the fewest GPUs per copy."""
+    out = {}
+    for r in rows:
+        k = (r["gpus_total"] is None, r["gpus_total"] or 0, r["per_copy"])
+        if r["shape"] not in out or k < out[r["shape"]][0]:
+            out[r["shape"]] = (k, r)
+    keep = {id(v[1]) for v in out.values()}
+    return [r for r in rows if id(r) in keep]
+
+
+def validated_archs(profiles, cat, names):
+    """{precision: GPU architectures} on which NVIDIA validated some profile of this NIM, architectures from Google's GPU table."""
+    out = {}
+    for acc, a in cat["accels"].items():
+        for p in profiles:
+            if a.get("arch") and nim_validated(p, acc, cat, names):
+                out.setdefault(p.get("precision"), set()).add(a["arch"])
+    return out
+
+
+def nim_need(profiles, accel, cat, precision=None):
+    """(GPUs one copy of a NIM needs on this GPU, the profile) from NVIDIA's profiles, fewest GPUs first; (None, None) when none fits."""
+    a = cat["accels"].get(accel) or {}
+    best = None
+    names = pci_names(profiles)
+    archs = validated_archs(profiles, cat, names)
+    for p in profiles:
+        if precision and (p.get("precision") or "") != precision:
+            continue
+        specific = bool(p.get("gpu") and re.search(r"\d", p["gpu"]))
+        if specific and not nim_gpu_matches(p["gpu"], accel, cat):
+            continue
+        if p.get("min_vram") and (not a.get("mem_gb") or a["mem_gb"] + 1e-6 < p["min_vram"]):
+            continue
+        if not p.get("min_vram") and not specific:
+            continue
+        # validated on this GPU first; then a precision NVIDIA validated on this GPU's architecture (FP4 validated only on Blackwell
+        # is not the first choice on Hopper); then the fewest GPUs
+        off_arch = bool(archs.get(p.get("precision"))) and a.get("arch") not in archs[p.get("precision")]
+        key = (not nim_validated(p, accel, cat, names), off_arch, p["tp"] * p["pp"], not specific, p.get("lora"))
+        if best is None or key < best[0]:
+            best = (key, p)
+    return (best[1]["tp"] * best[1]["pp"], best[1]) if best else (None, None)
+
+
+# ------------------------------------------------------------------ NVIDIA blueprints, samples and products on Google Cloud
+def hget(headers, name):
+    return next((v for k, v in (headers or {}).items() if k.lower() == name.lower()), None)
+
+
+def github_get(ctx, s, path, refresh=False):
+    """A GitHub API read, reused for GPUF_DOCS_TTL_S and then revalidated with its ETag, so an unchanged answer costs no rate limit."""
+    cpath = ctx.cache_path("gh-" + hashlib.sha256(path.encode()).hexdigest()[:20])
+    cur = load_json(cpath, {})
+    if cur.get("path") != path:
+        cur = {}
+    if cur and not refresh and now() - cur.get("fetched", 0) < DOCS_TTL_S:
+        return cur["body"]
+    tok = os.environ.get("GPUF_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    hdr = {"Accept": "application/vnd.github+json"}
+    if tok:
+        hdr["Authorization"] = "Bearer " + tok
+    try:
+        st, body, _, rh = web_get(ctx, GITHUB_API + path, headers=hdr, etag=cur.get("etag"))
+    except OSError as e:
+        if cur:
+            s.say(f"GitHub unreachable ({type(e).__name__}); using the copy read {cur.get('read')}", "y")
+            return cur["body"]
+        raise PageError(GITHUB_API + path, f"unreachable ({type(e).__name__})")
+    if st == 304 and cur:
+        cur["fetched"] = now()
+        atomic_json(cpath, cur, 0o644)
+        return cur["body"]
+    if st == 200:
+        data = json.loads(body)
+        atomic_json(cpath, {"path": path, "fetched": now(), "read": iso(), "etag": hget(rh, "ETag"), "body": data}, 0o644)
+        return data
+    if st in (403, 429) and (hget(rh, "X-RateLimit-Remaining") == "0" or b"rate limit" in body.lower()):
+        reset = hget(rh, "X-RateLimit-Reset")
+        raise PageError(GITHUB_API + path, "GitHub's rate limit is spent" + (f" until {iso(int(reset))}" if reset and reset.isdigit() else "")
+                        + ("" if tok else " (60 calls an hour without a token; set GPUF_GITHUB_TOKEN)"))
+    raise PageError(GITHUB_API + path, f"HTTP {st}")
+
+
+def github_raw(ctx, owner, repo, ref, path):
+    """One repository file, whole, from GitHub's raw file host (not counted against the API rate limit); cached."""
+    cpath = ctx.cache_path("ghraw-" + hashlib.sha256(f"{owner}/{repo}/{ref}/{path}".encode()).hexdigest()[:20])
+    cur = load_json(cpath, {})
+    if cur.get("fetched") and now() - cur["fetched"] < DOCS_TTL_S:
+        return cur["text"]
+    st, body, _, _ = web_get(ctx, f"{GITHUB_RAW}/{owner}/{repo}/{ref}/{urllib.parse.quote(path)}", accept="text/plain")
+    if st != 200:
+        raise PageError(path, f"HTTP {st}")
+    text = body[: MANIFEST_MAX_KB * 1024].decode("utf-8", "replace")
+    atomic_json(cpath, {"fetched": now(), "text": text}, 0o644)
+    return text
+
+
+def manifest_facts(text):
+    """What a deployment file states about GPUs: nvidia.com/gpu requests, GKE accelerator selectors and GPU type names, machine types,
+    and the NVIDIA NIM images it runs."""
+    return {"gpus": [int(x) for x in re.findall(r"nvidia\.com/gpu[\"']?\s*:\s*[\"']?(\d+)", text)],
+            "accels": sorted(set(re.findall(r"[\"'\s=:](nvidia-[a-z0-9]+(?:-[a-z0-9]+)*)\b", text))),
+            "machines": sorted(set(re.findall(r"\b(?:machine_type|machineType|machine-type)[\"']?\s*[:=]\s*[\"']?([a-z]\d+[a-z]?-[a-z]+-\d+[a-z0-9-]*)",
+                                               text))),
+            "nims": sorted(set(re.findall(r"nvcr\.io/(nim/[a-z0-9._-]+/[a-z0-9._-]+)", text)))}
+
+
+def is_gcp_source(owner, repo, path):
+    return owner in csv_list(GCP_OWNERS) or bool(re.search(GCP_PATH_RX, f"{repo}/{path}", re.I))
+
+
+def tree_items(paths, scope, nvidia_scope, dirs=()):
+    """Catalog items inside one repository tree: under an NVIDIA scope, each folder with a README (and nothing above it that has one);
+    elsewhere, each notebook or guide whose own name is NVIDIA's (GPUF_SAMPLE_PATH_RX), and for any other file or folder so named, the
+    nearest folder with a README that holds it (the sample it belongs to). Hidden folders such as .github are not samples."""
+    under = [p for p in paths if (not scope or p == scope or p.startswith(scope + "/")) and not re.search(r"(^|/)\.", p)]
+    out = []
+    if not nvidia_scope:
+        homes = {p.rsplit("/", 1)[0] for p in under if re.search(r"(^|/)readme\.md$", p, re.I) and "/" in p}
+        homes = {d for d in homes if d != scope and (not scope or d.startswith(scope + "/"))}
+        named = [p for p in under if re.search(SAMPLE_PATH_RX, p.rsplit("/", 1)[-1], re.I)]
+        docs = [p for p in named if re.search(r"\.(ipynb|md)$", p, re.I) and not re.search(r"(^|/)readme\.md$", p, re.I)]
+        for p in sorted(named, key=lambda x: (x.count("/"), x)):
+            if p in docs:
+                home = p
+            elif p in dirs and any(x.startswith(p + "/") for x in docs):
+                continue
+            else:
+                home, d = None, (p if p in dirs or "/" not in p else p.rsplit("/", 1)[0])
+                for _ in range(SAMPLE_HOME_LEVELS + 1):
+                    if d in homes:
+                        home = d
+                        break
+                    if "/" not in d:
+                        break
+                    d = d.rsplit("/", 1)[0]
+                home = home or (p if p in dirs or "/" not in p else p.rsplit("/", 1)[0])
+            if home not in out:
+                out.append(home)
+        # a folder with no README of its own belongs to a listed sample above it
+        return [h for h in out if h in homes or h in docs or not any(h.startswith(x + "/") for x in out)]
+    readmes = sorted({p.rsplit("/", 1)[0] for p in under if re.search(r"(^|/)readme\.md$", p, re.I) and "/" in p})
+    for d in readmes:
+        if (scope and not d.startswith(scope + "/")) or any(d.startswith(x + "/") for x in out):
+            continue
+        out.append(d)
+    if not out and scope:
+        out = [scope]
+    return out
+
+
+def repo_items(ctx, s, owner, repo, scope, kind, meta=None):
+    """Items from one GitHub repository, each with its Google Cloud paths, the GPUs its manifests request and the NIMs they run.
+    meta is the repository record when an organization listing already returned it (one API call fewer)."""
+    meta = meta or github_get(ctx, s, f"/repos/{owner}/{repo}")
+    if meta.get("archived"):
+        return []
+    ref = meta.get("default_branch") or "main"
+    tree = github_get(ctx, s, f"/repos/{owner}/{repo}/git/trees/{ref}?recursive=1")
+    blobs = [t["path"] for t in tree.get("tree") or [] if t.get("type") == "blob"]
+    dirs = [t["path"] for t in tree.get("tree") or [] if t.get("type") == "tree"]
+    truncated = bool(tree.get("truncated"))
+    nvidia_scope = bool(re.search(SAMPLE_PATH_RX, f"{repo}/{scope}", re.I)) or kind == "blueprint"
+    found = tree_items(blobs + dirs, scope, nvidia_scope, set(dirs)) if (scope or kind != "blueprint") else [""]
+    items = []
+    for path in found:
+        inside = [b for b in blobs if not path or b == path or b.startswith(path + "/")]
+        gcp_paths = sorted({b for b in inside if re.search(GCP_PATH_RX, b, re.I)})
+        gcp = is_gcp_source(owner, repo, scope) or bool(gcp_paths)
+        files = sorted((b for b in inside if re.search(MANIFEST_RX, b, re.I)), key=lambda b: (not re.search(GCP_PATH_RX, b, re.I), b))
+        mans, notes = [], (["GitHub returned only part of this repository's file tree; some paths are not seen"] if truncated else [])
+        for b in files[:MANIFEST_MAX_FILES]:
+            try:
+                f = manifest_facts(github_raw(ctx, owner, repo, ref, b))
+            except (PageError, OSError) as e:
+                notes.append(f"{b}: {getattr(e, 'why', e)}")
+                continue
+            if any(f.values()):
+                mans.append(dict(f, path=b))
+        if len(files) > MANIFEST_MAX_FILES:
+            notes.append(f"{len(files) - MANIFEST_MAX_FILES} more manifest files not read (GPUF_MANIFEST_MAX_FILES)")
+        is_file = path in blobs
+        items.append({"key": f"gh:{owner}/{repo}" + (f":{path}" if path else ""), "kind": kind, "name": (path or repo) if kind != "blueprint" else repo,
+                      "publisher": owner, "source": f"GitHub {owner}/{repo}", "updated": (meta.get("pushed_at") or "")[:10],
+                      "url": meta.get("html_url", f"https://github.com/{owner}/{repo}") + (f"/{'blob' if is_file else 'tree'}/{ref}/{path}" if path else ""),
+                      "gcp": gcp, "gcp_paths": gcp_paths[:8], "nims": sorted({n for m in mans for n in m["nims"]}), "nim_names": [],
+                      "manifests": mans, "notes": notes, "desc": meta.get("description") or ""})
+    return items
+
+
+def blueprint_repo(page, orgs, slug, title=""):
+    """owner/repo of a blueprint's own GitHub repository among those its NVIDIA page links to: the one sharing the most words with the
+    blueprint's name (or an acronym its title gives in parentheses), then one in an organization GPUF_CATALOG_SOURCES reads, then the most
+    linked. None when no linked repository shares a word with the name: pages also link the blueprints they build on."""
+    words = set(re.split(r"[-_]+", (slug or "").lower())) | {w.lower() for w in re.findall(r"\(([A-Za-z0-9]+)\)", title or "")}
+    words -= {"", "a", "an", "the", "for", "of", "to", "and", "with", "your", "own", "build", "blueprint", "nvidia", "ai"}
+    count = {}
+    for x in page.get("links") or []:
+        m = re.match(r"https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/#?]|$)", x.get("href") or "")
+        if m:
+            k = f"{m.group(1)}/{m.group(2)}"
+            count[k] = count.get(k, 0) + 1
+    scored = {k: len(words & set(re.split(r"[-_.]+", k.split("/")[1].lower()))) for k in count}
+    best = max(count, key=lambda k: (scored[k], k.split("/")[0].lower() in orgs, count[k], k), default=None)
+    return best if best and scored[best] else None
+
+
+def catalog_items(ctx, s, refresh=False):
+    """NVIDIA blueprints and samples for Google Cloud from every source in GPUF_CATALOG_SOURCES, read live; what each source could not
+    give is listed with the reason. An item removed or archived at its source is gone on the next read."""
+    path = ctx.cache_path("catalog-items-" + hashlib.sha256(CATALOG_SOURCES.encode()).hexdigest()[:12])
+    cur = load_json(path, {})
+    if from_cache(s, path, cur, DOCS_TTL_S, refresh):
+        return cur["items"], cur["errors"], cur["read"]
+    items, errors, archived = [], [], set()
+    nims = None
+    for spec in csv_list(CATALOG_SOURCES):
+        typ, _, rest = spec.partition(":")
+        try:
+            if typ == "ngc":
+                rows, _ = ngc_search(ctx, s, rest, "", refresh)
+                for r in rows:
+                    pub = (ngc_labels(r).get("publisher") or [r.get("orgName")])[0]
+                    names = csv_list(ngc_attrs(r).get("NIM") or "")
+                    items.append({"key": f"ngc:{r['resourceId']}", "kind": "blueprint", "name": r.get("displayName") or r.get("name"),
+                                  "publisher": pub, "source": "NGC catalog", "updated": (r.get("dateModified") or "")[:10],
+                                  "url": BLUEPRINT_PAGE.format(publisher=pub, name=r.get("name")), "gcp": None, "gcp_paths": [], "nims": [],
+                                  "nim_names": names, "manifests": [], "notes": [], "desc": r.get("description") or "", "slug": r.get("name"),
+                                  "preview": ngc_attrs(r).get("PREVIEW") == "true"})
+            elif typ == "github-org":
+                s.say(f"GitHub API: the public repositories of {rest}, then each repository's file tree (Google Cloud paths and manifests)")
+                repos, page = [], 1
+                while True:
+                    batch = github_get(ctx, s, f"/orgs/{rest}/repos?per_page=100&page={page}", refresh)
+                    repos += batch
+                    if len(batch) < 100:
+                        break
+                    page += 1
+                for r in repos:
+                    if r.get("archived") or r.get("disabled"):
+                        archived.add(f"{rest}/{r['name']}".lower())
+                        continue
+                    try:
+                        items += repo_items(ctx, s, rest, r["name"], "", "blueprint", meta=r)
+                    except PageError as e:
+                        errors.append(f"{rest}/{r['name']}: {e.why}")
+                        if "rate limit" in e.why:
+                            break
+            elif typ == "github":
+                ownrepo, _, scope = rest.partition(":")
+                owner, repo = ownrepo.split("/", 1)
+                s.say(f"GitHub API: {owner}/{repo}" + (f", under {scope}" if scope else "") + ", file tree and manifests")
+                items += repo_items(ctx, s, owner, repo, scope, "sample")
+            else:
+                errors.append(f"{spec}: unknown source type (ngc:TYPE, github-org:ORG or github:OWNER/REPO[:PATH])")
+        except PageError as e:
+            errors.append(f"{spec}: {e.why}")
+    # an NGC blueprint and its GitHub repository are one item: the repository its NVIDIA page links to most, else the same name
+    ngc = [i for i in items if i["key"].startswith("ngc:")]
+    if ngc:
+        s.say(f"NVIDIA's blueprint pages ({urllib.parse.urlparse(BLUEPRINT_PAGE).netloc}): the source repository each one links to, "
+              f"{len(ngc)} pages, {CATALOG_THREADS} at a time")
+        quiet = AuditOnly()
+        orgs = [r.partition(":")[2].lower() for r in csv_list(CATALOG_SOURCES) if r.startswith("github-org:")]
+
+        def link_of(i):
+            try:
+                return i, blueprint_repo(read_page(ctx, quiet, i["url"], refresh), orgs, i.get("slug"), i.get("name")), None
+            except PageError as e:
+                return i, None, e.why
+
+        with concurrent.futures.ThreadPoolExecutor(max(1, CATALOG_THREADS)) as ex:
+            for i, repo, why in ex.map(link_of, ngc):
+                i["repo_key"] = repo
+                if why:
+                    i["notes"].append(f"its NVIDIA page could not be read ({why}); matched to GitHub by name only")
+    orgs_read = {r.partition(":")[2].lower() for r in csv_list(CATALOG_SOURCES) if r.startswith("github-org:")}
+    by_repo = {i["key"][3:].lower(): i for i in items if i["key"].startswith("gh:") and i["kind"] == "blueprint"}
+    by_slug = {i["name"].lower(): i for i in items if i["key"].startswith("gh:") and i["kind"] == "blueprint"}
+    merged = []
+    for i in items:
+        twin = None
+        if i["key"].startswith("ngc:"):
+            twin = by_repo.get((i.get("repo_key") or "").lower()) or (None if i.get("repo_key") else by_slug.get((i.get("slug") or "").lower()))
+            if i.get("repo_key") and not twin:
+                i["repo"] = f"https://github.com/{i['repo_key']}"
+                if i["repo_key"].lower() in archived:
+                    i["notes"].append(f"its source repository {i['repo_key']} is archived on GitHub, so its Google Cloud paths are not read")
+                elif i["repo_key"].split("/")[0].lower() in orgs_read:
+                    i["notes"].append(f"its NVIDIA page links {i['repo_key']}, which GitHub no longer lists in that organization (renamed, "
+                                      f"made private or removed); its Google Cloud paths are not read")
+                else:
+                    i["notes"].append(f"its source repository {i['repo_key']} is outside the GitHub sources in GPUF_CATALOG_SOURCES; "
+                                      f"its Google Cloud paths are not read")
+        if twin:
+            i.update(gcp=twin["gcp"], gcp_paths=twin["gcp_paths"], manifests=twin["manifests"], nims=twin["nims"], repo=twin["url"],
+                     notes=twin["notes"])
+            twin["merged"] = True
+        merged.append(i)
+    items = [i for i in merged if not i.get("merged")]
+    if any(i["nim_names"] for i in items):
+        try:
+            nims, _ = nim_list(ctx, s, refresh)
+        except PageError as e:
+            errors.append(f"NIM list: {e.why}")
+    # NGC's blueprint attributes write a NIM's dots as underscores (llama-3_3-70b-instruct for llama-3.3-70b-instruct)
+    norm = lambda n: n.lower().replace("_", ".")  # noqa: E731
+    by_name = {norm(n["id"].rsplit("/", 1)[-1]): n["id"] for n in nims or []}
+    for i in items:
+        i["nims"] = sorted(set(i["nims"]) | {by_name[norm(n)] for n in i["nim_names"] if norm(n) in by_name})
+        unk = [n for n in i["nim_names"] if norm(n) not in by_name]
+        if unk:
+            i["notes"].append(f"NIMs named by NGC but not found among NVIDIA's NIM containers: {', '.join(unk)}")
+    rec = {"fetched": now(), "read": iso(), "items": items, "errors": errors}
+    atomic_json(path, rec, 0o644)
+    s.say(saved_where(path))
+    return items, errors, rec["read"]
+
+
+def product_from_title(page):
+    title = re.split(r"\s+[|\u2014]\s+", page.get("title") or "")
+    site = page.get("site") or (title[-1] if title else "")
+    return re.sub(r"\s+(documentation|docs|developer guide|guide)$", "", site.strip(), flags=re.I) or urllib.parse.urlparse(page["url"]).netloc
+
+
+def floors_from(cells):
+    """NVIDIA's floor from one product's requirement cells (keys in lower case): RAM, cores, GPU memory, driver and GPU class."""
+    def grab(prefix):
+        return next((v for k, v in cells.items() if k.startswith(prefix)), None)
+    ram, cores, vram, driver, gpu, cpu = grab("ram"), grab("cores"), grab("vram"), grab("driver"), grab("gpu"), grab("cpu")
+    m = re.search(r"(\d+)\s*GB", ram or "", re.I)
+    out = {"ram_gb": int(m.group(1)) if m else None, "cores": int(first_num(cores)) if cores and first_num(cores) else None,
+           "vram_gb": int(re.search(r"(\d+)\s*GB", vram).group(1)) if vram and re.search(r"(\d+)\s*GB", vram) else None,
+           "driver": None, "gpu": gpu, "graphics": bool(gpu and re.search(GRAPHICS_RX, gpu)), "cpu": cpu}
+    if driver:
+        m = re.search(r"Linux:\s*([\d.]+)", driver) or re.search(r"(\d+\.\d+(?:\.\d+)?)", driver)
+        out["driver"] = m.group(1) if m else None
+    return out
+
+
+GPU_MODEL_RX = r"\b([A-Z]{1,2}\d{2,4})\b"
+
+
+def gpu_rules(page):
+    """NVIDIA's GPU rules on a requirement page: GPU architectures it says are not supported, GPU models its renderer table lists
+    without an RTX mark (no RT cores), and whether it says GPUs without RT cores are not supported (and which it names)."""
+    text = " ".join(page.get("blocks") or [])
+    bad = set()
+    for m in re.finditer(r"architectures such as ([^.]+?) are not supported", text, re.I):
+        bad |= {w.strip().lower() for w in re.split(r",|\band\b|\bor\b", m.group(1)) if w.strip()}
+    no_rt = set()
+    for t in page.get("tables") or []:
+        hdr = [c.lower() for c in (t["rows"][0] if t.get("rows") else [])]
+        if hdr and "architecture" in hdr[0]:
+            for r in t["rows"][1:]:
+                if r and not re.search(r"\bRTX\b", r[0]):
+                    no_rt |= set(re.findall(GPU_MODEL_RX, r[0]))
+    needs_rt, named = False, set()
+    for m in re.finditer(r"without RT Cores?\s*\(([^)]*)\)[^.]*not supported", text, re.I):
+        needs_rt = True
+        named |= set(re.findall(GPU_MODEL_RX, m.group(1)))
+    return {"bad_archs": sorted(bad), "no_rt": sorted(no_rt), "needs_rt": needs_rt, "named_no_rt": sorted(named), "page": page.get("final")}
+
+
+def gpu_model_in(label, models):
+    """Whether a Google Cloud GPU label names one of these NVIDIA models (GB200 carries the B200)."""
+    mine = re.findall(GPU_MODEL_RX, label or "")
+    return any(x == m or (x.endswith(m) and len(x) - len(m) == 1) for x in mine for m in models)
+
+
+def product_requirements(ctx, s, url):
+    """The products an NVIDIA requirement page covers, each with NVIDIA's floor, and the Google Cloud page it links to with the
+    machine types that page names."""
+    page = read_page(ctx, s, url)
+    base = product_from_title(page)
+    rules = gpu_rules(page)
+    known = PUBLISHED.setdefault("gpu_rules", {"bad_archs": set(), "no_rt": set(), "pages": set()})
+    known["bad_archs"] |= set(rules["bad_archs"])
+    known["no_rt"] |= set(rules["no_rt"])
+    if rules["bad_archs"] or rules["no_rt"]:
+        known["pages"].add(page["final"])
+    out = []
+    for t in page["tables"]:
+        hdr, body = t["rows"][0], t["rows"][1:]
+        first = [r[0].split("[")[0].strip().lower() for r in body if r]
+        if any(f.startswith("ram") for f in first) and any(f.startswith(("gpu", "vram")) for f in first):
+            tier = next((i for i, h in enumerate(hdr) if re.search(REQ_TIER_RX, h, re.I)), 1)
+            cells = {r[0].split("[")[0].strip().lower(): r[tier] for r in body if len(r) > tier}
+            out.append({"product": base, "tier": hdr[tier] if tier < len(hdr) else "", "floors": floors_from(cells), "page": page["final"],
+                        "table": t.get("path") or t["head"]})
+        elif hcol(hdr, "ram") is not None and hcol(hdr, "gpu") is not None and re.search(REQ_TIER_RX, t.get("path") or t["head"] or "", re.I):
+            for r in body:
+                cells = {h.lower(): v for h, v in zip(hdr, r)}
+                gpu = cells.get(hdr[hcol(hdr, "gpu")].lower()) or ""
+                if not re.search(r"\d|RTX|NVIDIA|GeForce|Quadro", gpu, re.I):
+                    continue
+                out.append({"product": f"{r[0]} ({base})", "tier": "minimum", "floors": floors_from(cells), "page": page["final"],
+                            "table": t.get("path") or t["head"]})
+    names = [p["product"] for p in out]
+    for p in out:
+        if names.count(p["product"]) > 1:
+            p["product"] += f", {(p['table'] or '').rsplit(' / ', 1)[-1]}"
+    cloud = []
+    host = urllib.parse.urlparse(page["final"]).netloc
+    for lk in page["links"]:
+        if re.search(CLOUD_LINK_RX, lk["text"] or "", re.I) and urllib.parse.urlparse(lk["href"]).netloc == host and lk["href"] not in cloud:
+            cloud.append(lk["href"].split("#")[0])
+    named = {"page": None, "machines": [], "gpus": []}
+    for href in cloud[:2]:
+        try:
+            cp = read_page(ctx, s, href)
+        except PageError:
+            continue
+        text = " ".join(cp["blocks"])
+        named = {"page": cp["final"], "machines": sorted(set(re.findall(r"\b([a-z]\d+[a-z]?-[a-z]+-\d+[a-z0-9]*)\b", text))),
+                 "gpus": sorted(set(re.findall(r"\b(nvidia-[a-z0-9]+(?:-[a-z0-9]+)*)\b", text)))}
+        if named["machines"]:
+            break
+    for p in out:
+        p["named"] = named
+        p["rules"] = rules
+    return out
+
+
+def product_fit(ctx, req):
+    """Machine types that meet every NVIDIA floor for a product: GPU memory, an RTX graphics GPU where NVIDIA asks for one, host memory
+    and cores. NVIDIA's own Google Cloud machine types that fall short are reported, never recommended."""
+    cat, f = ctx.catalog, req["floors"]
+    rows, notes = [], []
+    named = set(req["named"]["machines"])
+    # NVIDIA's own GPU rules from the requirement pages read: unsupported architectures, and GPUs without RT cores where the product
+    # says those are not supported; Google's RTX vWS offering stands in only when the pages state neither
+    known = PUBLISHED.get("gpu_rules") or {}
+    rules = req.get("rules") or {}
+    bad, no_rt = set(known.get("bad_archs") or []), set(known.get("no_rt") or []) | set(rules.get("named_no_rt") or [])
+    by_rules = bool(bad or (rules.get("needs_rt") and no_rt))
+    if by_rules:
+        said = []
+        if bad:
+            said.append(f"architectures NVIDIA says its RTX renderer does not support: {', '.join(sorted(bad))}")
+        if rules.get("needs_rt"):
+            said.append(f"{req['product']} does not support GPUs without RT cores, which NVIDIA lists as {', '.join(sorted(no_rt))}")
+        notes.append("GPU rules from NVIDIA's pages (" + ", ".join(sorted(known.get("pages") or [rules.get("page") or ""])) + "): " + "; ".join(said))
+    for sname, s in cat["shapes"].items():
+        a = cat["accels"].get(s["accel"]) or {}
+        if s.get("fraction", 1.0) < 1.0:
+            continue
+        why = []
+        if f.get("vram_gb") and (not a.get("mem_gb") or a["mem_gb"] < f["vram_gb"]):
+            why.append(f"{a.get('mem_gb') or '?'} GB GPU memory < {f['vram_gb']} GB")
+        arch = (a.get("arch") or "").lower()
+        if bad and any(b in arch for b in bad):
+            why.append(f"{a.get('arch')} GPUs are not supported by NVIDIA's RTX renderer")
+        if rules.get("needs_rt") and gpu_model_in(a.get("label"), no_rt):
+            why.append("no RT cores, which NVIDIA requires for it")
+        if f.get("graphics") and not by_rules and not a.get("vws"):
+            why.append("no RTX graphics (Google offers no RTX Virtual Workstation for this GPU)")
+        if f.get("ram_gb") and s["mem_gib"] * 1.073741824 + 1e-6 < f["ram_gb"]:
+            why.append(f"{s['mem_gib'] * 1.073741824:.1f} GB memory < {f['ram_gb']} GB")
+        if f.get("cores") and s["vcpus"] < f["cores"] * VCPU_PER_CORE:
+            why.append(f"{s['vcpus']} vCPUs < {f['cores']} cores ({f['cores'] * VCPU_PER_CORE} vCPUs at {VCPU_PER_CORE} per core)")
+        base = s.get("base") or sname
+        if base in named and why:
+            note = (f"NVIDIA's Google Cloud page names {base}" + (f" ({req['named']['page']})" if req["named"]["page"] else "")
+                    + f", but with {a.get('label') or s['accel']} it falls short of NVIDIA's own {req['tier'] or 'minimum'}: {'; '.join(why)}")
+            if note not in notes:
+                notes.append(note)
+        if why:
+            continue
+        rt = not (no_rt and gpu_model_in(a.get("label"), no_rt))
+        rows.append({"accel": s["accel"], "label": a.get("label"), "shape": sname, "gpus_vm": s["gpus"], "per_copy": s["gpus"], "copies_vm": 1,
+                     "mem_gb": a.get("mem_gb"), "vcpus": s["vcpus"], "mem_gib": s["mem_gib"], "tested": base in named, "mark": "named by NVIDIA", "capacity": None,
+                     "rt": rt, "basis": "meets NVIDIA's floor" + (" and is named by NVIDIA for Google Cloud" if base in named else "")
+                     + ("" if rt else "; no RT cores, so NVIDIA's renderer table lists fewer features on it")})
+    return rows, notes
+
+
+def item_components(ctx, s, item, precision=None):
+    """What one deployment of a blueprint or sample needs: each NIM it runs (sized by NVIDIA's profiles) and each GPU request its
+    manifests state outside a NIM."""
+    comps = []
+    for rid in item.get("nims") or []:
+        profiles, src = nim_profiles(ctx, s, rid)
+        comps.append({"name": rid, "kind": "nim", "profiles": profiles, "source": src})
+    for m in item.get("manifests") or []:
+        if m["nims"]:
+            continue
+        for g in m["gpus"]:
+            comps.append({"name": m["path"], "kind": "request", "gpus": g, "accels": [a for a in m["accels"] if a in ctx.catalog["accels"]],
+                          "source": f"{item['source']} {m['path']}"})
+    return comps
+
+
+def ffd_vms(sizes, cap):
+    """VMs needed to place every component (GPUs each) on VMs of `cap` GPUs, largest first, each on one VM (first-fit decreasing)."""
+    bins = []
+    for n in sorted(sizes, reverse=True):
+        for i, left in enumerate(bins):
+            if left >= n:
+                bins[i] -= n
+                break
+        else:
+            bins.append(cap - n)
+    return len(bins)
+
+
+def item_fit(ctx, comps, units, precision=None):
+    """Per machine type: GPUs each component needs on its GPU, how many VMs hold `units` deployments, GPUs in total; components that
+    cannot be sized are reported."""
+    cat, rows, notes = ctx.catalog, [], []
+    # a NIM with no published profile cannot be sized by anyone's numbers: it is named on every row, never guessed
+    unpublished = [c["name"] for c in comps if c["kind"] == "nim" and not c["profiles"]]
+    for acc, a in cat["accels"].items():
+        sizes, misfit, valid = [], [], 0
+        names = None
+        for c in comps:
+            if c["kind"] == "nim":
+                if not c["profiles"]:
+                    continue
+                n, p = nim_need(c["profiles"], acc, cat, precision)
+                if p is not None:
+                    names = names if names is not None else pci_names(c["profiles"])
+                    valid += nim_validated(p, acc, cat, names)
+            else:
+                n = c["gpus"] if not c["accels"] or acc in c["accels"] else None
+            if n is None:
+                misfit.append(c["name"])
+            else:
+                sizes.append(n)
+        if misfit or not sizes:
+            continue
+        for sname in a["shapes"]:
+            s = cat["shapes"][sname]
+            if s.get("fraction", 1.0) < 1.0 or s["gpus"] < max(sizes):
+                continue
+            vms = ffd_vms(sizes * units, s["gpus"])
+            rows.append({"accel": acc, "label": a["label"], "shape": sname, "gpus_vm": s["gpus"], "per_copy": sum(sizes), "copies_vm": None,
+                         "mem_gb": a.get("mem_gb"), "vcpus": s["vcpus"], "mem_gib": s["mem_gib"], "tested": False, "capacity": None, "units": units,
+                         "vms": vms, "gpus_total": vms * s["gpus"], "parts": sizes, "validated_parts": valid,
+                         "basis": f"{len(sizes)} part(s) of {', '.join(map(str, sizes))} GPU(s)"
+                                  + (f", {valid} validated by NVIDIA on this GPU" if valid else "")
+                                  + (f"; {len(unpublished)} part(s) not sized" if unpublished else "")})
+    for c in comps:
+        if c["kind"] == "nim" and not c["profiles"]:
+            notes.append(f"not sized, add its GPUs yourself: {c['name']}: {c['source']}")
+    rows.sort(key=lambda r: (r["gpus_total"], -r["validated_parts"], r["gpus_vm"], r["vcpus"], r["shape"]))
+    return rows, notes
 
 
 # ------------------------------------------------------------------ the plan
@@ -4233,7 +6103,7 @@ def quota_needs(ctx, req, regions_split, obtained=0.0):
         rec = {"qid": qid, "dims": L["dims"], "label": L["label"], "kind": L["kind"], "limit": lim, "used": used, "need": amount,
                "preferred": None if used is None else used + amount, "region": region, "shape": s["name"] if s else None, "nodes": nodes,
                "display": display, "fixed": info.get("fixed"), "eligible": info.get("eligible"), "inelig": info.get("inelig"),
-               "pre": L.get("pre", False)}
+               "pre": L.get("pre", False), "service": L.get("service") or "compute.googleapis.com"}
         if not qid:
             rec["action"], rec["why"] = "none", L.get("note") or "no quota to request"
         elif lim is None or used is None:
@@ -4281,7 +6151,7 @@ def pref_id(run_id, rec):
 
 
 def pref_body(ctx, rec, contact, justification):
-    body = {"service": "compute.googleapis.com", "quotaId": rec["qid"], "quotaConfig": {"preferredValue": str(rec["preferred"])},
+    body = {"service": rec.get("service") or "compute.googleapis.com", "quotaId": rec["qid"], "quotaConfig": {"preferredValue": str(rec["preferred"])},
             "justification": justification}
     if rec["dims"]:
         body["dimensions"] = rec["dims"]
@@ -4471,6 +6341,9 @@ def vm_props(ctx, req, shape, method, region, labels, zone=None):
     net = vm_network(ctx, req, region)
     if net is None:
         raise ApiError(400, f"no subnet in {region} for VMs; pass --subnet or create one", {"error": {"status": "NO_SUBNET"}}, reason="NO_SUBNET")
+    if not shape.get("boot_disk"):
+        raise ApiError(400, f"no boot disk type is known for {shape['name']}: Google's disk-support tables ({doc_url('accel')}) do not cover it",
+                       {"error": {"status": "NO_BOOT_DISK"}}, reason="NO_BOOT_DISK")
     mt = f"zones/{zone}/machineTypes/{shape['base']}" if zone else shape["base"]
     disk = f"zones/{zone}/diskTypes/{shape['boot_disk']}" if zone else shape["boot_disk"]
     props = {"machineType": mt,
@@ -4881,7 +6754,9 @@ class Hunt:
         if self.dry:
             ts["last"] = "dry run"
             ts["next_at"] = now() + jitter(TARGET_INTERVAL_S)
-            self.note(f"dry run: would request {nodes} x {shape['name']} in {where} via {METHOD_LABEL[self.method]}")
+            body = self.reservation_body(shape, nodes, "(name chosen at create time)") if self.method == "reservation" else None
+            self.note(f"dry run: would request {nodes} x {shape['name']} in {where} via {METHOD_LABEL[self.method]}"
+                      + (f"; request body {json.dumps(body, sort_keys=True)}" if body else ""))
             return
         try:
             got = getattr(self, "hold_" + self.method.replace("-", "_"))(tg, shape, nodes)
@@ -4939,6 +6814,12 @@ class Hunt:
             ts["next_at"] = t + jitter(TARGET_INTERVAL_S)
             self.once(f"tr|{c.kind}|{where}", f"{tg['shape']} in {where}: {c.title} ({c.fix})", "warn")
             return
+        shape = self.shape(tg["shape"])
+        if c.kind == "not_offered" or (c.kind == "invalid" and re.search(r"not supported|does not support|is not available for|not allowed for",
+                                                                          c.title, re.I) and re.search(re.escape(shape["base"]) + r"|provisioning|reservation",
+                                                                                                       c.title, re.I)):
+            # Google's own answer is the last word on which holding method a machine type takes; it is kept so the option is not offered again
+            learn_refusal(self.ctx, self.method, shape, c.title)
         if c.kind in ("region_access", "no_subnet") or (c.kind == "org_policy" and c.extra.get("constraint") == "gcp.resourceLocations"):
             scope = [x for x in self.targets if x["region"] == tg["region"]]
         elif c.kind in PROJECT_WIDE:
@@ -4975,16 +6856,23 @@ class Hunt:
             raise err
         return op
 
-    def hold_reservation(self, tg, shape, nodes):
-        zone = tg["zone"]
-        name = self.next_name("r")
+    def reservation_body(self, shape, nodes, name):
         props = {"machineType": shape["base"]}
         if shape["attached"]:
             props["guestAccelerators"] = [{"acceleratorType": shape["accel"], "acceleratorCount": shape["gpus"]}]
         body = {"name": name, "specificReservationRequired": True, "description": f"gcp-gpu-finder run {self.st['run_id']}",
                 "specificReservation": {"count": str(nodes), "instanceProperties": props}}
+        if (self.req.get("workload") or {}).get("target") == "vertex":
+            # Google: Vertex AI consumes a reservation only when its sharing policy allows it (serviceShareType ALLOW_ALL)
+            body["reservationSharingPolicy"] = {"serviceShareType": "ALLOW_ALL"}
         if self.req.get("reservation_ttl_s"):
             body["deleteAfterDuration"] = {"seconds": str(int(self.req["reservation_ttl_s"]))}
+        return body
+
+    def hold_reservation(self, tg, shape, nodes):
+        zone = tg["zone"]
+        name = self.next_name("r")
+        body = self.reservation_body(shape, nodes, name)
         self._track({"kind": "reservation", "name": name, "zone": zone, "at": iso()})
         try:
             op = self.api.call("POST", f"{COMPUTE}/projects/{self.ctx.project}/zones/{zone}/reservations", params={"requestId": str(uuid.uuid4())}, body=body)
@@ -5134,7 +7022,8 @@ class Hunt:
         op = self.api.call("POST", f"{COMPUTE}/projects/{self.ctx.project}/zones/{best['zone']}/futureReservations", params={"requestId": str(uuid.uuid4())}, body=body)
         self._op(op)
         self.st["pending"].append({"kind": "calendar", "name": name, "zone": best["zone"], "region": tg["region"], "shape": shape["name"], "nodes": nodes,
-                                   "gpus": nodes * shape["gpu_equiv"], "created": iso(), "start": best["start"], "end": best["end"], "state": "submitted"})
+                                   "gpus": nodes * shape["gpu_equiv"], "created": iso(), "start": best["start"], "end": best["end"], "state": "submitted",
+                                   "reservation": body["reservationName"]})
         self.note(msg + f"; submitted as {name}", "good")
         return -nodes
 
@@ -5227,10 +7116,30 @@ class Hunt:
             p["state"] = "held"
             self.st["holds"].append({"kind": "calendar", "name": p["name"], "zone": p["zone"], "region": p["region"], "shape": p["shape"],
                                      "nodes": p["nodes"], "gpus": p["gpus"], "method": "calendar", "created": iso(), "state": "held",
-                                     "usd_h": None, "start": p.get("start"), "expires": p.get("end")})
+                                     "usd_h": None, "start": p.get("start"), "expires": p.get("end"), "reservation": p.get("reservation")})
             self.note(f"HELD: calendar reservation {p['name']} approved for {p['nodes']} x {p['shape']} from {p.get('start')}", "good")
         elif ps in ("DECLINED", "FAILED", "CANCELLED"):
             p["state"] = ps.lower()
+
+    def share_calendar_with_vertex(self):
+        """Google lets Vertex AI consume a calendar reservation's auto-created reservation only once it starts, and only after its
+        sharing policy is set to ALLOW_ALL; set it on each held one whose start has passed, once, and report Google's answer."""
+        if (self.req.get("workload") or {}).get("target") != "vertex":
+            return
+        for h in self.held():
+            if h["kind"] != "calendar" or h.get("vertex_shared") or not h.get("reservation") or not h.get("start") or parse_iso(h["start"]) > now():
+                continue
+            url = f"{COMPUTE}/projects/{self.ctx.project}/zones/{h['zone']}/reservations/{h['reservation']}"
+            try:
+                op = self.api.call("PATCH", url, params={"paths": "reservationSharingPolicy.serviceShareType", "requestId": str(uuid.uuid4())},
+                                   body={"name": h["reservation"], "reservationSharingPolicy": {"serviceShareType": "ALLOW_ALL"}})
+                self._op(op)
+                h["vertex_shared"] = iso()
+                self.note(f"calendar reservation {h['reservation']} is now shared with Vertex AI (serviceShareType ALLOW_ALL)", "good")
+            except ApiError as e:
+                c = classify(e, self.ctx.project)
+                self.once(f"vshare|{h['reservation']}", f"could not share {h['reservation']} with Vertex AI: {c.title}. Fix: {c.fix}", "warn")
+        self.save()
 
     def check_holds(self):
         """Notice capacity that disappeared: preempted Spot VMs, flex-start VMs at their end, reservations deleted or expired."""
@@ -5263,6 +7172,7 @@ class Hunt:
                 h["lost_why"] = gone
                 self.note(f"lost: {h['kind']} {h['name']} in {h['zone']} is {gone}; {'hunting again' if self.req.get('maintain') else 'counted out'}", "warn")
         self.save()
+        self.share_calendar_with_vertex()
 
     def reconcile_inflight(self):
         """After a crash or a forced exit, find what an unfinished request actually created."""
@@ -5727,39 +7637,47 @@ def link(t, title, url):
     return f"{title}: " + t.s(url, "c", "u")
 
 
-def show_terms(ctx, unit):
+TARGET_TERMS = {
+    "vertex": ["model copy    one running server of the model on every GPU of one VM: a Vertex AI endpoint runs one serving container",
+               "              per replica VM, on a machine type Google tested for the model, so a copy is never split or doubled up"],
+    "nim": ["model copy    one NIM container on the GPUs its NVIDIA profile needs (tensor x pipeline parallel), all inside one VM;",
+            "              on GKE several copies share a VM, one pod each with its own GPUs, when the VM has GPUs for them"]}
+
+
+def show_terms(ctx, unit, target=None):
     """The words Google Cloud uses, so GPUs, VM instances and copies are never confused."""
     t = ctx.t
     t.line(t.s(" How Google Cloud counts it", "c", "b"))
     t.line("   VM instance   one Compute Engine VM of one machine type, for example g4-standard-96; the machine type fixes how many GPUs are attached")
     if unit == "copy":
-        t.line("   model copy    one running server of the model on the GPUs it needs, all inside one VM (tensor parallel never spans VMs);")
-        t.line("                 Agent Platform (Vertex AI) calls each VM that serves a deployed model a replica")
+        for ln in TARGET_TERMS.get(target or "vertex"):
+            t.line("   " + ln)
     else:
-        t.line(f"   {unit:<13s} one {unit} of this product, sized as Google's page for it states")
+        t.line(f"   {unit:<13s} one {unit}, sized from what its publisher states (the 'sized by' column)")
     t.line("   GPUs in total VM instances x GPUs per VM; quota, the goal and every count in this tool are in GPUs")
     t.line("")
 
 
-def show_workload(ctx, title, sub, rows, notes, unit, docs, recommend=None, explain=None):
-    """Only the machine types that fit, with what each needs to reach the target, cheapest in GPUs first."""
+def show_workload(ctx, title, sub, rows, notes, unit, docs, recommend=None, explain=None, target=None, links=()):
+    """Only the machine types that fit, with what each needs to reach the target, cheapest in GPUs first, and what each is sized by."""
     t = ctx.t
     heading(ctx, title, sub)
-    show_terms(ctx, unit)
+    show_terms(ctx, unit, target)
     out = []
     for r in rows:
         p = min((x for x in (price_of(ctx, ctx.catalog["shapes"][r["shape"]], reg, "vms") for reg in ctx.catalog["shapes"][r["shape"]]["regions"])
                  if x is not None), default=None)
-        mark = t.s(" recommended", "g", "b") if recommend is r else (t.s(" tested by Google", "c") if r.get("tested") else "")
-        out.append([r["label"], r["shape"] + mark, r["gpus_vm"], r["per_copy"], r["copies_vm"], "-" if r.get("capacity") is None else r["capacity"],
-                    "-" if r.get("vms") is None else r["vms"], "-" if r.get("gpus_total") is None else t.s(r["gpus_total"], "b"),
-                    money(None if p is None or not r.get("vms") else p * r["vms"])])
+        mark = t.s(" recommended", "g", "b") if recommend is r else (t.s(" " + (r.get("mark") or "named by its publisher"), "c") if r.get("tested") else "")
+        out.append([r["label"], r["shape"] + mark, r["gpus_vm"], r["per_copy"], "-" if r.get("copies_vm") is None else r["copies_vm"],
+                    "-" if r.get("capacity") is None else r["capacity"], "-" if r.get("vms") is None else r["vms"],
+                    "-" if r.get("gpus_total") is None else t.s(r["gpus_total"], "b"), money(None if p is None or not r.get("vms") else p * r["vms"]),
+                    r.get("basis") or ""])
     hdr = ["GPU", "machine type", "GPUs per VM", f"GPUs per {unit}", f"{plural_of(unit)} per VM", "requests per copy", "VM instances", "GPUs in total",
-           "on-demand $/h from"]
+           "on-demand $/h from", "sized by"]
     if unit != "copy":
         hdr.pop(5)
         out = [r[:5] + r[6:] for r in out]
-    for ln in table(hdr, out, t.width(), right=tuple(range(2, len(hdr)))):
+    for ln in table(hdr, out, t.width(), right=tuple(range(2, len(hdr) - 1))):
         t.line(ln)
     t.line(t.s(f"  only machine types that hold a whole {unit} are listed; $/h is the lowest on-demand price among regions offering it", "gr"))
     for n in notes:
@@ -5769,13 +7687,17 @@ def show_workload(ctx, title, sub, rows, notes, unit, docs, recommend=None, expl
         t.line(t.s("  " + explain, "c"))
     t.line("")
     for k in docs:
-        title_, url = DOCS[k]
-        t.line("  " + link(t, title_, url))
+        title_, url = doc_link(ctx, k)
+        if url:
+            t.line("  " + link(t, title_, url))
+    for title_, url in links:
+        if url:
+            t.line("  " + link(t, title_, url))
 
 
 def choose_workload(ctx, req, args):
     """What the GPUs will run: an NVIDIA model in Model Garden, an NVIDIA product on Google Cloud, or the customer's own choice."""
-    t, ask = ctx.t, ctx.ask
+    ask = ctx.ask
     wl = dict(req.get("workload") or {})
     prices(ctx)
     mg, mg_err, mg_read = [], None, None
@@ -5788,26 +7710,17 @@ def choose_workload(ctx, req, args):
             c = classify(e, ctx.project)
             mg_err = c.title + ("; `setup` can turn it on" if c.kind == "api_disabled" else "")
             s.result(f"not readable: {mg_err}. The Model Garden choice is unavailable; fix: {c.fix}", "y")
-    mp, mp_err = [], None
-    with ctx.rep.step("Reading NVIDIA's Google Cloud Marketplace VM images", f"image project {MARKETPLACE_IMAGE_PROJECT}, current images only "
-                                                                          f"(published in the last {IMAGE_LOOKBACK_DAYS} days)") as s:
-        try:
-            mp, _ = marketplace_products(ctx, s, refresh=args.refresh)
-            s.result(f"{len(mp)} current product(s): {', '.join(p['name'] for p in mp) or 'none'}")
-        except (ApiError, AuthError) as e:
-            mp_err = classify(e, ctx.project).title
-            s.result(f"not readable: {mp_err}", "y")
-    ctx.rep.say(t.s("Omniverse, Isaac Sim, Kit App Streaming, BioNeMo and NIM come from Google's pages about them, built into this file "
-                    "(no Google API lists Marketplace products); each shows its page", "gr"))
     fams = sorted({e["model"] for e in mg})
-    prod_names = [s["name"].split(" (")[0] for s in NVIDIA_SOLUTIONS] + [p["name"] for p in mp]
-    kinds = [{"key": "model", "label": "An NVIDIA model in Vertex AI Model Garden", "disabled": mg_err if not mg else None,
-              "note": f"{len(mg)} versions of {', '.join(fams)}, with the machine types Google tested; read {mg_read}" if mg else ""},
-             {"key": "product", "label": "An NVIDIA product on Google Cloud",
-              "note": f"{', '.join(prod_names[:6])}{' ...' if len(prod_names) > 6 else ''}" + (f" (Marketplace images unreadable: {mp_err})" if mp_err else "")},
+    kinds = [{"key": "model", "label": "An NVIDIA model: Vertex AI Model Garden, or an NVIDIA NIM on GKE or a VM",
+              "note": (f"Model Garden: {len(mg)} versions of {', '.join(fams)}, read {mg_read}" if mg else f"Model Garden unreadable ({mg_err}); NIMs only")
+              + "; NIMs: NVIDIA's NGC catalog and NIM Metadata API, read live"},
+             {"key": "catalog", "label": "An NVIDIA blueprint, sample or product on Google Cloud",
+              "note": "read live from NGC, GitHub (GPUF_CATALOG_SOURCES), NVIDIA's requirement pages (GPUF_PRODUCT_PAGES) and NVIDIA's "
+                      "Marketplace image projects"},
              {"key": "none", "label": "Something else: I will choose the GPUs myself"}]
-    kind = ask.choose("What will these GPUs run?", kinds, default=args.workload or wl.get("kind") or ("model" if mg else "none"), flag="--workload",
-                      help_text="NVIDIA models come from Model Garden; NVIDIA products from Google Cloud Marketplace and Google's NVIDIA guides.",
+    want = {"product": "catalog"}.get(args.workload, args.workload) or {"product": "catalog"}.get(wl.get("kind"), wl.get("kind"))
+    kind = ask.choose("What will these GPUs run?", kinds, default=want or "model", flag="--workload",
+                      help_text="Each choice is sized only from what Google or NVIDIA publishes for it; where they publish nothing, you choose the GPUs.",
                       alt={"skip": ("none", "no workload sizing: every GPU this project can use is offered"),
                            "none": ("none", "no workload sizing: every GPU this project can use is offered"), "all": (None, "one workload per run")})
     if kind == "none":
@@ -5815,7 +7728,7 @@ def choose_workload(ctx, req, args):
         return None
     if kind == "model":
         return size_model(ctx, req, args, mg, mg_read, wl)
-    return size_product(ctx, req, args, mp, wl)
+    return size_catalog(ctx, req, args, wl)
 
 
 def pick_by_fragment(items, frag, key="key", name="name"):
@@ -5826,8 +7739,46 @@ def pick_by_fragment(items, frag, key="key", name="name"):
     return hits[0][key] if hits else None
 
 
+def ask_traffic(ctx, args, wl, info, maxc):
+    """The longest request and the peak in flight; (context, peak, units) with units asked instead when requests cannot be sized."""
+    t, ask = ctx.t, ctx.ask
+    dctx = wl.get("context") or args.context or (min(FIT_CONTEXT, maxc) if maxc else FIT_CONTEXT)
+    context = int(ask.ask("Longest prompt plus answer per request, in tokens", dctx, flag="--context",
+                          check=lambda s: None if s.isdigit() and int(s) > 0 and (not maxc or int(s) <= maxc) else f"a whole number up to {maxc or 'the model limit'}"))
+    peak = units = None
+    if not info or info.get("errors"):
+        t.line(t.s(f" Requests per copy cannot be estimated: {'; '.join((info or {}).get('errors') or ['no published architecture'])}. "
+                   f"Enter the number of copies instead.", "y"))
+    else:
+        peak = int(ask.ask("Peak requests in flight at the same time, across all copies", wl.get("peak") or args.peak or FIT_CONCURRENCY,
+                           check=lambda s: None if s.isdigit() and int(s) > 0 else "a whole number above 0", flag="--peak"))
+    return context, peak, units
+
+
+def ask_units(ctx, args, wl, what):
+    return int(ctx.ask.ask(f"How many {what} at the same time?", wl.get("units") or args.units or 1,
+                           check=lambda s: None if s.isdigit() and int(s) > 0 else "a whole number above 0", flag="--units"))
+
+
 def size_model(ctx, req, args, mg, mg_read, wl):
-    """Size a Model Garden model: where Google tested it, what fits at the customer's context, and how many copies the peak needs."""
+    """Where the model will be deployed decides how it is sized: a Vertex AI endpoint (Google's tested configurations) or NVIDIA NIM."""
+    opts = [{"key": "vertex", "label": "Vertex AI endpoint, deployed from Model Garden",
+             "note": "only the machine types Google tested for the model; one copy per replica VM; Vertex AI serving quota; reservations shared with "
+                     "Vertex AI", "disabled": None if mg else "Model Garden could not be read"},
+            {"key": "nim", "label": "NVIDIA NIM on GKE or a Compute Engine VM",
+             "note": "only the GPU counts NVIDIA publishes NIM profiles for; on GKE several copies may share a VM, one pod each"}]
+    target = ctx.ask.choose("Where will the model run?", opts, default=args.target or wl.get("target") or (TARGET if mg else "nim"), flag="--target",
+                            help_text="Google and NVIDIA publish different deployment rules; the tool sizes only what the chosen one supports.",
+                            alt={"all": (None, "one deployment method per run: each has its own rules, quota and holding methods")})
+    ctx.opts["target"] = target
+    if target == "vertex":
+        return size_vertex(ctx, req, args, mg, mg_read, wl)
+    return size_nim(ctx, req, args, mg, wl)
+
+
+def size_vertex(ctx, req, args, mg, mg_read, wl):
+    """Size a Model Garden model for a Vertex AI endpoint: Google's tested configurations only, one copy per replica VM, requests per
+    copy from the model's architecture and Google's serving settings, and the spare VMs Google asks for when a reservation is consumed."""
     t, ask, cat = ctx.t, ctx.ask, ctx.catalog
 
     def tested(e):
@@ -5845,38 +7796,35 @@ def size_model(ctx, req, args, mg, mg_read, wl):
     key = ask.choose(f"NVIDIA models in Model Garden (Agent Platform API, read {mg_read})", opts, default=dflt, flag="--model",
                      alt={"all": (None, "one model per run; run the finder again for another")})
     e = next(x for x in mg if x["key"] == key)
-    info, peak, units = None, None, None
+    info, peak, units, context = None, None, None, None
     tested_len = max((c.get("max_len") or 0 for c in e["configs"]), default=0)
     if e["kind"] == "llm":
+        repos = [e.get("source_id")] + list(e.get("source_alts") or [])
         with ctx.rep.step(f"Reading the published architecture of {e['source_id'] or e['name']}",
-                          "weight size and attention layout, to estimate how many requests one copy serves; Model Garden deploys this "
-                          "repository (its MODEL_ID) and keeps its own copy in a bucket that is not readable") as s:
-            if e.get("source_id"):
-                info = model_details(ctx, e["source_id"], s)
-            else:
-                info = {"errors": ["Model Garden names no source repository for it"], "kv": {}}
+                          "weight size and attention layout, to estimate how many requests one copy serves; Model Garden names the repository "
+                          "(MODEL_ID) and its container loads Google's own copy, whose path names it too") as s:
+            info = model_details(ctx, repos, s)
             kvt = (info.get("kv") or {}).get("kv_per_token")
-            s.result(f"{info.get('weights_gb')} GB of weights, {(info.get('kv') or {}).get('attn_layers')} attention layers, {kvt} bytes of cache "
-                     f"per token" if not info.get("errors") else "; ".join(info["errors"]), "g" if not info.get("errors") else "y")
-        maxc = (info.get("kv") or {}).get("max_context") or tested_len or None
-        dctx = wl.get("context") or args.context or (min(FIT_CONTEXT, maxc) if maxc else FIT_CONTEXT)
-        context = int(ask.ask("Longest prompt plus answer per request, in tokens", dctx, flag="--context",
-                              check=lambda s: None if s.isdigit() and int(s) > 0 and (not maxc or int(s) <= maxc) else f"a whole number up to {maxc or 'the model limit'}"))
-        if info.get("errors"):
-            t.line(t.s(f" Requests per copy cannot be estimated: {'; '.join(info['errors'])}. Enter the number of copies instead.", "y"))
-        else:
-            peak = int(ask.ask("Peak requests in flight at the same time, across all copies", wl.get("peak") or args.peak or FIT_CONCURRENCY,
-                               check=lambda s: None if s.isdigit() and int(s) > 0 else "a whole number above 0", flag="--peak"))
+            s.result(f"{info.get('repo')}: {info.get('weights_gb')} GB of weights, {(info.get('kv') or {}).get('attn_layers')} attention layers, "
+                     f"{kvt} bytes of cache per token" if not info.get("errors") else "; ".join(info["errors"]), "g" if not info.get("errors") else "y")
+        context, peak, units = ask_traffic(ctx, args, wl, info, (info.get("kv") or {}).get("max_context") or tested_len or None)
     else:
-        context = None
         t.line(t.s(" This tool cannot estimate how many requests one copy of a generation model serves at once; plan copies from your own tests.", "c"))
     if peak is None:
-        units = int(ask.ask("How many copies of the model should run at the same time?", wl.get("units") or args.units or 1,
-                            check=lambda s: None if s.isdigit() and int(s) > 0 else "a whole number above 0", flag="--units"))
+        units = ask_units(ctx, args, wl, "copies of the model (Vertex AI replicas)")
     rows, notes = mg_fit(ctx, e, context or 0, info)
     rows = plan_units(rows, units=units, peak=peak)
     if not rows:
         raise SystemExit(f"{e['name']} fits no GPU this project can use at {context} tokens: " + "; ".join(notes))
+    # Vertex AI consumes a specific reservation and needs spare VMs in it for updates; Google's page states how many
+    spare_why = None
+    for r in rows:
+        if r.get("vms"):
+            spare, spare_why = vertex_spare(ctx, r["vms"])
+            r["replicas"], r["spare"] = r["vms"], spare
+            r["vms"] += spare
+            r["gpus_total"] = r["vms"] * r["gpus_vm"]
+    rows = sorted(rows, key=lambda r: (r["gpus_total"] is None, r["gpus_total"] or 0, r["gpus_vm"], r["vcpus"], r["shape"]))
     best = rows[0]
     if e.get("default_machine") and best["gpus_total"] is not None:
         same = [r for r in rows if r["shape"] == e["default_machine"] and r["gpus_total"] == best["gpus_total"]]
@@ -5886,71 +7834,238 @@ def size_model(ctx, req, args, mg, mg_read, wl):
            + (f", {preq:.2f} GB of cache per request at {context} tokens" if preq else ""))
     explain = None
     if best.get("vms"):
-        why = (f"{peak} requests at once at up to {context} tokens need {plural(best['units'], 'copy')} of up to {best['capacity']} requests each"
-               if peak else plural(best["units"], "copy"))
+        why = (f"{peak} requests at once at up to {context} tokens need {plural(best['units'], 'replica')} of up to {best['capacity']} requests each"
+               if peak else plural(best["units"], "replica"))
         explain = (f"Recommended: {best['gpus_total']} GPUs = {plural(best['vms'], 'VM instance')} of {best['shape']} with {best['gpus_vm']} x "
-                   f"{best['label']} each, {plural(best['copies_vm'], 'copy')} per VM; {why}.")
-    show_workload(ctx, "Where this model runs", sub, rows, notes, "copy", ["model_garden", "deploy_open", "gpus"], best, explain)
+                   f"{best['label']} each: {why}" + (f", plus {best['spare']} spare VM(s) Vertex AI needs in the reservation for updates" if best.get("spare")
+                                                     else "") + ".")
+    if spare_why:
+        notes.append("spare VMs: " + spare_why)
+    show_workload(ctx, "Where this model runs on Vertex AI", sub, rows, notes, "copy", ["model_garden", "deploy_open", "vertex_reservations"], best, explain,
+                  target="vertex")
     if info and not info.get("errors"):
-        t.line(t.s(f"  requests per copy: estimated from the model's architecture and weight size (MODEL_ID {e['source_id']}), "
-                   f"capped by Google's tested --max-num-seqs where set", "gr"))
-    return record_workload(req, "model", e["key"], e["name"], rows, best, "copy", context=context, peak=peak, units=units)
+        t.line(t.s(f"  requests per copy: from the architecture and weight size of {info['repo']}, on the GPUs Google's configuration uses "
+                   f"(TP x PP x DP), capped by its --max-num-seqs per data-parallel rank", "gr"))
+    return record_workload(req, "model", e["key"], e["name"], rows, best, "copy", context=context, peak=peak, units=units, target="vertex",
+                           precision=e.get("precision"))
 
 
-def size_product(ctx, req, args, mp, wl):
-    """Size an NVIDIA product: the GPUs Google's page for it allows, or a Marketplace VM image used as the operating system."""
-    t, ask, cat = ctx.t, ctx.ask, ctx.catalog
-    opts = []
-    for s in NVIDIA_SOLUTIONS:
-        rule = {"g_series": "G series machine types (Google's GPU page names them for Omniverse)", "min": s.get("note", ""),
-                "model": s.get("note", "")}[s["rule"]]
-        opts.append({"key": s["key"], "label": s["name"], "note": f"{s['where']}; {rule}; from Google Cloud documentation"})
-    for p in mp:
-        opts.append({"key": "mp:" + p["id"], "label": p["name"],
-                     "note": f"Marketplace VM image {p['image'].rsplit('/', 1)[-1]} ({p['os'] or p['arch']}), {p['created'][:10]}"
-                             + ("; license fee charged by Google" if p.get("fee") else "") + "; read live"})
-    items = [{"key": o["key"], "name": o["label"]} for o in opts]
-    dflt = pick_by_fragment(items, args.product) or (wl.get("key") if wl.get("kind") == "product" and any(o["key"] == wl.get("key") for o in opts) else None) \
-        or opts[0]["key"]
-    key = ask.choose("NVIDIA products on Google Cloud", opts, default=dflt, flag="--product",
-                     help_text="No Google API lists Marketplace products: the first entries come from Google's NVIDIA pages, the rest are read from "
-                               f"NVIDIA's Marketplace image project {MARKETPLACE_IMAGE_PROJECT}.")
-    if key.startswith("mp:"):
-        p = next(x for x in mp if "mp:" + x["id"] == key)
+def size_nim(ctx, req, args, mg, wl):
+    """Size an NVIDIA NIM for GKE or a VM from the profiles NVIDIA publishes for it: per GPU, the profile with the fewest GPUs whose
+    memory floor the GPU meets; copies share a VM only as whole profiles."""
+    t, ask = ctx.t, ctx.ask
+    with ctx.rep.step("Reading NVIDIA's NIM containers", "NGC catalog, public search; the NIMs NVIDIA publishes, newest first") as s:
+        nims, read = nim_list(ctx, s, refresh=args.refresh)
+        s.result(f"{len(nims)} NIM containers")
+    if not nims:
+        raise SystemExit("NGC lists no NIM containers right now; choose Model Garden or size the GPUs yourself")
+    slugs = {model_slug(e["key"]) for e in mg}
+    in_mg = lambda n: any(slug_related(n["slug"], x) for x in slugs)  # noqa: E731
+    nims = sorted(nims, key=lambda n: (not in_mg(n), n["id"]))
+    opts = [{"key": n["id"], "label": n["name"], "note": f"{n['id']}; updated {n['updated']}" + ("; also in Model Garden" if in_mg(n) else "")}
+            for n in nims]
+    hit = pick_by_fragment([{"key": n["id"], "name": n["name"] + " " + n["slug"]} for n in nims], model_slug(args.model) if args.model else None)
+    if args.model and not hit:
+        # never size a different NIM than the one asked for: unattended, stop; interactive, say so and let the list be chosen from
+        msg = f"no NVIDIA NIM on NGC matches {args.model!r} (NIM names are compared without the precision suffix)"
+        if not ask.interactive:
+            raise SystemExit(msg + "; run `catalog` for the NIMs NVIDIA publishes, or size it on Vertex AI with --target vertex")
+        ctx.rep.say(msg + "; choose the NIM from the list", "y")
+    saved = wl.get("nim") if any(n["id"] == wl.get("nim") for n in nims) else None
+    dflt = hit or saved or (opts[0]["key"] if ask.interactive and not args.model else None)
+    rid = ask.choose(f"NVIDIA NIMs (NGC, read {read})", opts, default=dflt, flag="--model", alt={"all": (None, "one NIM per run")})
+    nim = next(n for n in nims if n["id"] == rid)
+    key, where = ngc_key(ctx, prompt=True)
+    with ctx.rep.step(f"Reading the profiles NVIDIA publishes for {rid}", f"NVIDIA NIM Metadata API, tag {NIM_TAG}"
+                      + (f"; NIM model card with the NGC key from {where}" if key else "; no NGC key, so the model card's stated minimum is not read")) as s:
+        profiles, src = nim_profiles(ctx, s, rid, refresh=args.refresh)
+        minimum = nim_card_minimum(ctx, s, rid) if key else None
+        s.result(f"{len(profiles)} profiles; {src}" + (f"; model card minimum: {minimum}" if minimum else ""), "g" if profiles else "y")
+    if not profiles:
+        heading(ctx, nim["name"], "no published profiles")
+        t.line(t.s(f"  {src}. Without NVIDIA's profiles this tool does not guess how many GPUs a copy needs; choose them yourself.", "y"))
+        req["workload"] = {"kind": "model", "key": rid, "name": nim["name"], "target": "nim", "nim": rid}
+        return None
+    precs = sorted({p["precision"] for p in profiles if p.get("precision")})
+    linked = [e for e in mg if slug_related(model_slug(e["key"]), nim["slug"])]
+    want = (args.precision or "").lower() or next((e["precision"].lower() for e in linked if args.model and e["key"] == args.model and e.get("precision")),
+                                                 None)
+    foot = {p: min(((q.get("min_vram") or 0) * q["tp"] * q["pp"] for q in profiles if q.get("precision") == p and q.get("min_vram")), default=1e9)
+            for p in precs}
+    precision = ask.choose("Precision of the weights the NIM serves", [{"key": p, "label": p, "note": f"{sum(q['precision'] == p for q in profiles)} profiles"
+                                                                        + (f", at least {foot[p]:g} GB of GPU memory in all" if foot[p] < 1e9 else "")}
+                                                                       for p in precs],
+                           default=want if want in precs else min(precs, key=lambda p: foot[p]), flag="--precision") if len(precs) > 1 else (precs[0] if precs else None)
+    info = None
+    repos = [r for e in linked if (e.get("precision") or "").lower() == (precision or "") for r in [e.get("source_id")] + list(e.get("source_alts") or [])]
+    if repos:
+        with ctx.rep.step(f"Reading the published architecture of {repos[0]}", "weight size and attention layout, to estimate requests per copy") as s:
+            info = model_details(ctx, repos, s)
+            s.result(f"{info.get('repo')}: {info.get('weights_gb')} GB of weights" if not info.get("errors") else "; ".join(info["errors"]),
+                     "g" if not info.get("errors") else "y")
+    else:
+        info = {"errors": ["no Model Garden version names this NIM's repository at this precision, so its architecture is not read"]}
+    context, peak, units = ask_traffic(ctx, args, wl, info, (info.get("kv") or {}).get("max_context"))
+    if peak is None:
+        units = ask_units(ctx, args, wl, "copies of the NIM")
+    rows, notes = nim_fit(ctx, rid, profiles, precision, context, None if info.get("errors") else info)
+    rows = best_per_shape(plan_units(rows, units=units, peak=peak))
+    if not rows:
+        raise SystemExit(f"{rid}: no GPU this project can use meets NVIDIA's profiles at {precision}: " + "; ".join(notes))
+    if NIM_VALIDATED_FIRST:
+        rows = sorted(rows, key=lambda r: (not r.get("validated"), r["gpus_total"] is None, r["gpus_total"] or 0, r["gpus_vm"], r["vcpus"], r["shape"]))
+    if not any(r.get("validated") for r in rows):
+        notes.append(f"NVIDIA has validated none of its {precision} profiles for this NIM on a Google Cloud GPU; every row meets only the "
+                     f"memory floor NVIDIA states")
+    best = rows[0]
+    if minimum:
+        notes.append(f"NVIDIA's model card for {rid} states the minimum GPUs as {minimum}; the rows follow its NIM profiles")
+    if want and precision != want:
+        notes.insert(0, f"NVIDIA publishes no {want} profile for {rid} (it publishes {', '.join(precs)}); these rows are for {precision}, "
+                        f"so the NIM serves {precision} weights, not the {want} version asked for")
+    notes.append(f"profiles: {src}")
+    explain = None
+    if best.get("vms"):
+        why = (f"{peak} requests at once need {plural(best['units'], 'copy')} of up to {best['capacity']} requests each" if peak
+               else plural(best["units"], "copy"))
+        explain = (f"Recommended: {best['gpus_total']} GPUs = {plural(best['vms'], 'VM instance')} of {best['shape']} with {best['gpus_vm']} x {best['label']} "
+                   f"each, {plural(best['copies_vm'], 'copy')} per VM ({best['basis']}); {why}.")
+    show_workload(ctx, "Where this NIM runs on GKE or a VM", f"{nim['name']} {precision or ''}", rows, notes, "copy", ["nim_profiles"], best, explain,
+                  target="nim")
+    return record_workload(req, "model", rid, nim["name"], rows, best, "copy", context=context, peak=peak, units=units, target="nim", nim=rid,
+                           precision=precision)
+
+
+def read_catalog(ctx, refresh=False):
+    """Every NVIDIA thing on Google Cloud this tool can size or list, read live: products from NVIDIA's requirement pages, blueprints
+    and samples from NGC and GitHub, and NVIDIA's Marketplace VM images. Returns (options, errors)."""
+    opts, errors = [], []
+    with ctx.rep.step("Reading NVIDIA's product requirement pages", f"{len(csv_list(PRODUCT_PAGES))} page(s) in GPUF_PRODUCT_PAGES and the Google Cloud "
+                                                                   f"pages they link to") as s:
+        n = 0
+        for url in csv_list(PRODUCT_PAGES):
+            try:
+                for i, p in enumerate(product_requirements(ctx, s, url)):
+                    f = p["floors"]
+                    opts.append({"key": f"req:{hashlib.sha256((url + p['product']).encode()).hexdigest()[:10]}", "kind": "product", "label": p["product"],
+                                 "obj": p, "note": ", ".join(x for x in (f"{f['ram_gb']} GB RAM" if f.get("ram_gb") else "",
+                                                                       f"{f['cores']} cores" if f.get("cores") else "",
+                                                                       f"{f['vram_gb']} GB GPU memory" if f.get("vram_gb") else "",
+                                                                       "an RTX GPU" if f.get("graphics") else "",
+                                                                       f"driver {f['driver']}" if f.get("driver") else "") if x)
+                                 + f"; NVIDIA's {p['tier'] or 'minimum'}, {p['page']}"})
+                    n += 1
+            except PageError as e:
+                errors.append(f"{url}: {e.why}")
+        s.result(f"{n} product requirement set(s)", "y" if errors else "g")
+    with ctx.rep.step("Reading NVIDIA blueprints and samples for Google Cloud", "NGC catalog and GitHub, from GPUF_CATALOG_SOURCES") as s:
+        items, errs, read = catalog_items(ctx, s, refresh)
+        errors += errs
+        for i in items:
+            parts = [i["kind"], i["source"], f"updated {i['updated']}" if i.get("updated") else "",
+                     "Google Cloud deployment" if i.get("gcp") else ("no Google Cloud path found" if i.get("gcp") is False else "Google Cloud path not checked"),
+                     f"{len(i['nims'])} NIM(s)" if i.get("nims") else "",
+                     f"GPU requests {sorted({g for m in i['manifests'] for g in m['gpus']})}" if any(m["gpus"] for m in i.get("manifests") or []) else ""]
+            opts.append({"key": i["key"], "kind": i["kind"], "label": i["name"], "obj": i, "note": "; ".join(p for p in parts if p)})
+        s.result(f"{len(items)} blueprints and samples, read {read}" + (f"; {len(errs)} source problem(s)" if errs else ""), "y" if errs else "g")
+    with ctx.rep.step("Reading NVIDIA's Google Cloud Marketplace VM images", f"image projects {MARKETPLACE_IMAGE_PROJECT}, current images only "
+                                                                          f"(published in the last {IMAGE_LOOKBACK_DAYS} days)") as s:
+        try:
+            mp, _ = marketplace_products(ctx, s, refresh=refresh)
+            for p in mp:
+                opts.append({"key": "mp:" + p["id"], "kind": "image", "label": p["name"], "obj": p,
+                             "note": f"Marketplace VM image {p['image'].rsplit('/', 1)[-1]} ({p['os'] or p['arch']}), {p['created'][:10]}"
+                                     + ("; license fee charged by Google" if p.get("fee") else "")})
+            s.result(f"{len(mp)} current image product(s)")
+        except (ApiError, AuthError) as e:
+            errors.append(f"Marketplace images: {classify(e, ctx.project).title}")
+            s.result(f"not readable: {classify(e, ctx.project).title}", "y")
+    return opts, errors
+
+
+def size_catalog(ctx, req, args, wl):
+    """Size an NVIDIA blueprint, sample or product from what its publisher states: NVIDIA's requirement floor, the NIMs a blueprint runs
+    (sized by NVIDIA's NIM profiles) or the GPUs its manifests request. Where nothing is stated, the GPUs are left to the customer."""
+    t, ask = ctx.t, ctx.ask
+    opts, errors = read_catalog(ctx, refresh=args.refresh)
+    for e in errors:
+        ctx.rep.say(t.s(f"not read: {e}", "y"))
+    if not opts:
+        raise SystemExit("no NVIDIA blueprint, sample or product could be read; see the problems above")
+    items = [{"key": o["key"], "name": o["label"] + " " + o["note"]} for o in opts]
+    dflt = pick_by_fragment(items, args.product) or (wl.get("key") if any(o["key"] == wl.get("key") for o in opts) else None) or opts[0]["key"]
+    key = ask.choose("NVIDIA blueprints, samples and products on Google Cloud (read live)", opts, default=dflt, flag="--product",
+                     help_text="Products carry NVIDIA's stated floor; blueprints and samples carry the NIMs and GPU requests their sources state.",
+                     alt={"all": (None, "one item per run")})
+    o = next(x for x in opts if x["key"] == key)
+    obj = o["obj"]
+    if o["kind"] == "image":
+        p = obj
         req["image"], req["image_label"] = p["image"], f"{p['name']} ({p['image'].rsplit('/', 1)[-1]})"
         req["boot_disk_gb"] = max(int(req.get("boot_disk_gb") or BOOT_DISK_GB), p["disk_gb"])
         heading(ctx, p["name"], "Google Cloud Marketplace VM image")
-        t.line(f"  The VMs boot from {p['image']}; its disk needs at least {p['disk_gb']} GB. Google publishes no GPU sizing for this image, "
+        t.line(f"  The VMs boot from {p['image']}; its disk needs at least {p['disk_gb']} GB. NVIDIA publishes no GPU sizing with this image, "
                f"so every GPU for its CPU architecture ({p['arch']}) is offered.")
-        for k in ("marketplace", "gpus", "drivers"):
-            t.line("  " + link(t, *DOCS[k]))
+        for k in ("marketplace", "drivers"):
+            title_, url = doc_link(ctx, k)
+            if url:
+                t.line("  " + link(t, title_, url))
         req["workload"] = {"kind": "product", "key": key, "name": p["name"], "arch": p["arch"], "image": p["image"], "disk_gb": p["disk_gb"]}
         return {"rows": None, "arch": p["arch"]}
-    s = next(x for x in NVIDIA_SOLUTIONS if x["key"] == key)
-    if s["rule"] == "model":
-        heading(ctx, s["name"], s["where"])
-        t.line(t.s("  " + s["note"], "c"))
-        for k in s["docs"]:
-            t.line("  " + link(t, *DOCS[k]))
-        req["workload"] = {"kind": "product", "key": key, "name": s["name"]}
+    if o["kind"] == "product":
+        rows, notes = product_fit(ctx, obj)
+        if not rows:
+            raise SystemExit(f"no machine type this project can use meets NVIDIA's floor for {obj['product']}: " + "; ".join(notes))
+        units = ask_units(ctx, args, wl, "workstations or nodes (one VM each)")
+        # a GPU with RT cores before one NVIDIA lists without them, at the same GPU count
+        rows = sorted(plan_units(rows, units=units), key=lambda r: (r["gpus_total"] is None, r["gpus_total"] or 0, not r.get("rt", True), not r["tested"],
+                                                                    r["gpus_vm"], r["vcpus"], r["shape"]))
+        best = rows[0]
+        f = obj["floors"]
+        notes.insert(0, "NVIDIA's floor: " + ", ".join(x for x in (f"{f['ram_gb']} GB RAM" if f.get("ram_gb") else "", f"{f['cores']} cores" if f.get("cores") else "",
+                                                                    f"{f['vram_gb']} GB GPU memory" if f.get("vram_gb") else "",
+                                                                    f"an RTX GPU ({f['gpu']})" if f.get("graphics") else (f"GPU {f['gpu']}" if f.get("gpu") else ""),
+                                                                    f"NVIDIA driver {f['driver']} or newer" if f.get("driver") else "") if x)
+                     + f" ({obj['tier'] or 'minimum'}, {obj['page']})")
+        explain = (f"Recommended: {best['gpus_total']} GPUs = {plural(best['vms'], 'VM instance')} of {best['shape']} with {best['gpus_vm']} x {best['label']} "
+                   f"each, the smallest machine type that meets every NVIDIA floor, for {plural(units, 'workstation')}.")
+        links = [("NVIDIA requirements", obj["page"])] + ([("NVIDIA on Google Cloud", obj["named"]["page"])] if obj["named"].get("page") else [])
+        show_workload(ctx, "Where this product runs", obj["product"], rows, notes, "workstation", [], best, explain, links=links)
+        return record_workload(req, "product", key, obj["product"], rows, best, "workstation", units=units)
+    item = obj
+    links = [(item["source"], item["url"])] + ([("repository", item["repo"])] if item.get("repo") else [])
+    with ctx.rep.step(f"Sizing {item['name']}", "each NIM it runs from NVIDIA's NIM profiles, and each GPU request its manifests state") as s:
+        comps = item_components(ctx, s, item)
+        s.result(f"{len(comps)} part(s): " + ", ".join(c["name"] for c in comps[:8]) if comps else "nothing it states can be sized", "g" if comps else "y")
+    if item.get("url", "").startswith("https://build.nvidia.com/"):
+        try:
+            read_page(ctx, ctx.rep, item["url"])
+        except PageError as e:
+            links = [x for x in links if x[1] != item["url"]]
+            ctx.rep.say(f"the blueprint page {item['url']} is not live ({e.why}); link left out", "y")
+    if not comps:
+        heading(ctx, item["name"], item["source"])
+        t.line(t.s(f"  {item['source']} states no NIM and no GPU request for it, so this tool does not size it; choose the GPUs yourself.", "y"))
+        for n in item.get("notes") or []:
+            t.line(t.s("  note: " + n, "gr"))
+        for title_, url in links:
+            t.line("  " + link(t, title_, url))
+        req["workload"] = {"kind": "catalog", "key": key, "name": item["name"]}
         return None
-    if s["rule"] == "g_series":
-        rows = fit_rows(ctx, {a: 1 for a in cat["accels"]}, family=r"g\d")
-        for r in rows:
-            # one workstation or streaming node is one VM, whatever its GPU count
-            r["per_copy"], r["copies_vm"] = r["gpus_vm"], 1
-    else:
-        rows = fit_rows(ctx, {a: n for a, n in s["min"].items() if a in cat["accels"]})
+    units = ask_units(ctx, args, wl, "deployments")
+    rows, notes = item_fit(ctx, comps, units)
+    notes = (item.get("notes") or []) + notes
+    if item.get("gcp") is False:
+        notes.append("its source has no Google Cloud deployment path; the sizing still follows what it states")
     if not rows:
-        raise SystemExit(f"no GPU this project can use matches what Google's page for {s['name']} asks for")
-    units = int(ask.ask(f"How many {s['unit']}s at the same time? (each is sized as Google's page states)", wl.get("units") or args.units or 1,
-                        check=lambda v: None if v.isdigit() and int(v) > 0 else "a whole number above 0", flag="--units"))
-    rows = plan_units(rows, units=units)
+        raise SystemExit(f"{item['name']}: no single GPU type this project can use runs every part it states: " + "; ".join(notes))
     best = rows[0]
-    explain = (f"Recommended: {best['gpus_total']} GPUs = {plural(best['vms'], 'VM instance')} of {best['shape']} with {best['gpus_vm']} x "
-               f"{best['label']} each, for {plural(units, s['unit'])}." + (f" {s['note']}." if s.get("note") else ""))
-    show_workload(ctx, "Where this product runs", f"{s['name']}, {s['where']}", rows, [], s["unit"], s["docs"], best, explain)
-    return record_workload(req, "product", key, s["name"], rows, best, s["unit"], units=units)
+    unsized = [c["name"] for c in comps if c["kind"] == "nim" and not c["profiles"]]
+    explain = (f"Recommended: {best['gpus_total']} GPUs = {plural(best['vms'], 'VM instance')} of {best['shape']} with {best['gpus_vm']} x {best['label']} "
+               f"each, for {plural(units, 'deployment')} of {best['basis']}; on GKE each part is its own pod with its own GPUs."
+               + (f" Not included, because NVIDIA publishes no GPU sizing for them: {', '.join(unsized)}." if unsized else ""))
+    show_workload(ctx, "Where this blueprint runs", item["name"], rows, notes, "deployment", [], best, explain, target="nim", links=links)
+    return record_workload(req, "catalog", key, item["name"], rows, best, "deployment", units=units, target="nim")
 
 
 def record_workload(req, kind, key, name, rows, best, unit, **extra):
@@ -5958,12 +8073,15 @@ def record_workload(req, kind, key, name, rows, best, unit, **extra):
     fits, per_copy = {}, {}
     for r in rows:
         fits.setdefault(r["accel"], []).append(r["shape"])
-        per_copy[r["accel"]] = min(per_copy.get(r["accel"], r["per_copy"]), r["per_copy"])
-    rec = {k: best.get(k) for k in ("accel", "shape", "gpus_vm", "per_copy", "copies_vm", "capacity", "units", "vms", "gpus_total")}
+        # a blueprint's parts pack onto VMs in any GPU count, so only a whole-copy layout constrains the GPU total
+        if r.get("copies_vm"):
+            per_copy[r["accel"]] = min(per_copy.get(r["accel"], r["per_copy"]), r["per_copy"])
+    rec = {k: best.get(k) for k in ("accel", "shape", "gpus_vm", "per_copy", "copies_vm", "capacity", "units", "vms", "gpus_total", "replicas", "spare",
+                                    "basis")}
     rec["unit"] = unit
     req["workload"] = dict(kind=kind, key=key, name=name, fits=fits, per_copy=per_copy,
-                           copies_vm={r["shape"]: r["copies_vm"] for r in rows}, recommend=rec, rows=[{k: r.get(k) for k in rec if k != "unit"} for r in rows],
-                           **extra)
+                           copies_vm={r["shape"]: r["copies_vm"] for r in rows if r.get("copies_vm")}, recommend=rec,
+                           rows=[{k: r.get(k) for k in rec if k != "unit"} for r in rows], **extra)
     return {"rows": rows, "best": best}
 
 
@@ -5976,8 +8094,10 @@ def show_plan(ctx, req, regions, n_pref, dropped):
     wl = req.get("workload") or {}
     if wl.get("name"):
         rec = wl.get("recommend") or {}
-        t.line(f" for {wl['name']}" + (f": {plural(rec['units'], rec['unit'])} of {plural(rec['per_copy'], 'GPU')}, recommended as "
-                                       f"{plural(rec['vms'], 'VM instance')} of {rec['shape']} = {rec['gpus_total']} GPUs" if rec.get("vms") else ""))
+        where = {"vertex": " on a Vertex AI endpoint", "nim": " as NVIDIA NIM on GKE or a VM"}.get(wl.get("target"), "")
+        t.line(f" for {wl['name']}{where}" + (f": {plural(rec['units'], rec['unit'])} of {plural(rec['per_copy'], 'GPU')}, recommended as "
+                                              f"{plural(rec['vms'], 'VM instance')} of {rec['shape']} = {rec['gpus_total']} GPUs" if rec.get("vms") else "")
+               + (f" ({rec['replicas']} replicas and {rec['spare']} spare VM(s) Vertex AI needs in the reservation)" if rec.get("spare") else ""))
     if req["method"] in ("vms", "spot", "flex", "flex-group"):
         t.line(f" VM image: {req.get('image_label') or req.get('image')}; boot disk {req.get('boot_disk_gb')} GB")
     t.line(f" regions, in order: {', '.join(regions[:n_pref])}" + (f"; then {', '.join(regions[n_pref:])}" if len(regions) > n_pref else ""))
@@ -6020,6 +8140,18 @@ def show_plan(ctx, req, regions, n_pref, dropped):
     na = sorted({x["why"] for x in rows if not x["allowed"]})
     for why in na:
         t.line(t.s(f" n/a: {why}", "gr"))
+    vq = {}
+    for x in rows:
+        for L in x["layers"]:
+            if L["kind"] == "vertex_gpu":
+                vq.setdefault((x["region"], L["label"]), L)
+    for (region, label), L in sorted(vq.items()):
+        t.line(f" {label} in {region}: " + (f"{'?' if L['used'] is None else L['used']} used of {L['limit']}" if L.get("qid") and L["limit"] is not None
+                                            else (L.get("note") or "limit unknown"))
+               + "; Vertex AI's serving quota for this GPU, shown beside the Compute Engine quota the reservation itself draws on "
+                 f"({doc_addr(ctx, 'vertex_reservations')} says which applies when an endpoint consumes a reservation)")
+    if ctx.book and getattr(ctx.book, "verror", None):
+        t.line(t.s(f" Vertex AI serving quotas unreadable: {ctx.book.verror.title}", "y"))
     for n in sorted(unknown_notes):
         t.line(t.s(f" unknown limit, {n}; Google may still refuse for quota", "y"))
     if ctx.book and ctx.book.error:
@@ -6176,9 +8308,10 @@ def wizard(ctx, req, args):
     if hidden:
         t.line(t.s(f" {hidden} other GPU type(s) are not listed: they do not fit this workload.", "gr"))
     rec = wl.get("recommend") or {}
+    # with no recommendation, the GPU this project can use in the most regions, which is usually the easiest to find
     default_acc = (req.get("accel") if req.get("accel") in [o["key"] for o in opts] else None) or args.gpu or rec.get("accel") \
-        or ("nvidia-rtx-pro-6000" if "nvidia-rtx-pro-6000" in [o["key"] for o in opts] else opts[0]["key"])
-    req["accel"] = ask.choose("GPU model", opts, default=default_acc, flag="--gpu", help_text=f"Details: {DOCS['gpus'][1]}",
+        or max(opts, key=lambda o: len(cat["accels"][o["key"]]["regions"]))["key"]
+    req["accel"] = ask.choose("GPU model", opts, default=default_acc, flag="--gpu", help_text=f"Details: {doc_addr(ctx, 'gpus')}",
                               alt={"all": (None, "one GPU type per run: quota, prices and the GPU goal count GPUs of one type; run the finder again "
                                                  "for another type")})
     acc = cat["accels"][req["accel"]]
@@ -6189,8 +8322,9 @@ def wizard(ctx, req, args):
     if best_mine and best_mine.get("gpus_total"):
         unit = rec.get("unit") or "copy"
         hint = (f"Recommended for {wl['name']}: {best_mine['gpus_total']} GPUs = {plural(best_mine['vms'], 'VM instance')} of {best_mine['shape']} "
-                f"({plural(best_mine['gpus_vm'], 'GPU')} each, {plural(best_mine['copies_vm'], unit)} per VM) for {plural(best_mine['units'], unit)}"
-                + (f" serving {wl['peak']} requests at once" if wl.get("peak") else "") + ".")
+                f"({plural(best_mine['gpus_vm'], 'GPU')} each" + (f", {plural(best_mine['copies_vm'], unit)} per VM" if best_mine.get("copies_vm") else "")
+                + f") for {plural(best_mine['units'], unit)}" + (f" serving {wl['peak']} requests at once" if wl.get("peak") else "")
+                + (f", {best_mine['spare']} of the VMs spare for Vertex AI updates" if best_mine.get("spare") else "") + ".")
 
     def num_ok(s):
         try:
@@ -6226,8 +8360,9 @@ def wizard(ctx, req, args):
         gone = [s["name"] for s in shapes if s["name"] not in allowed]
         shapes = [s for s in shapes if s["name"] in allowed]
         if gone:
-            t.line(t.s(f" {len(gone)} machine type(s) of this GPU are not listed ({', '.join(gone)}): one {rec.get('unit') or 'copy'} needs "
-                       f"{fnum(minper)} GPU(s) in one VM.", "gr"))
+            why = {"vertex": "Google tested this model on the listed ones only"}.get(wl.get("target")) or \
+                (f"one {rec.get('unit') or 'copy'} needs {fnum(minper)} GPU(s) in one VM" if minper else "they do not meet what this workload needs")
+            t.line(t.s(f" {len(gone)} machine type(s) of this GPU are not listed ({', '.join(gone)}): {why}.", "gr"))
     cv = wl.get("copies_vm") or {}
     sopts = []
     for s in shapes:
@@ -6239,7 +8374,7 @@ def wizard(ctx, req, args):
     dshapes = [x for x in (req.get("shapes") or csv_list(args.shapes)) if x in keys] or \
         first + [k for k in keys if k not in first and cat["shapes"][k]["fraction"] >= 1.0]
     req["shapes"] = ask.multi("Machine types allowed, in order of preference (smaller VMs are usually easier to get)", sopts, default=dshapes,
-                              flag="--shapes", help_text=f"Each is one VM instance; details: {DOCS['accel'][1]}",
+                              flag="--shapes", help_text=f"Each is one VM instance; details: {doc_addr(ctx, 'accel')}",
                               alt={"skip": ([k for k in keys if cat["shapes"][k]["fraction"] >= 1.0] or keys,
                                             "every machine type with whole GPUs, so any that is free counts")})
     archs = {cat["shapes"][s].get("cpu_arch") for s in req["shapes"]} - {None}
@@ -6261,7 +8396,9 @@ def wizard(ctx, req, args):
         return None
 
     every = (",".join(offered), f"all {len(offered)} regions offering these machine types")
-    req["regions"] = csv_list(ask.ask("Preferred region(s), best first (names, groups like asia-pacific, or prefixes like asia)",
+    groups = sorted(by_geo) or geo_names()
+    req["regions"] = csv_list(ask.ask(f"Preferred region(s), best first (names, Google's geographies such as {', '.join(groups[:3]) or 'apac'}, or "
+                                      f"prefixes like {(offered[0].split('-')[0]) if offered else 'us'})",
                                       ",".join(req.get("regions") or []) or args.region or (offered[0] if offered else None), check=regions_ok, flag="--region",
                                       alt={"skip": every, "all": every, "none": (None, "the search needs at least one region; skip takes them all")}))
     fb = ask.ask("Fallback regions or groups if the preferred ones have no capacity",
@@ -6275,16 +8412,28 @@ def wizard(ctx, req, args):
                       "all": (None, "excluding every region leaves nowhere to search")})
     req["exclude"] = [] if ex.strip().lower() == "none" else csv_list(ex)
     mopts = []
+    target = wl.get("target")
     for m in METHODS:
         dis = None
         cap = ctx.caps.get(METHOD_CAP[m]) or {}
-        if cap.get("ok") is False:
+        if target == "vertex" and m not in ("reservation", "calendar"):
+            dis = ("a Vertex AI endpoint cannot use VMs created here; it consumes a reservation shared with it, and its own Spot and flex-start "
+                   "options are chosen when the model is deployed")
+        elif cap.get("ok") is False:
             dis = "missing " + ", ".join(cap["missing"][:3])
         elif not any(method_allows(m, cat["shapes"][s])[0] for s in req["shapes"]):
             dis = method_allows(m, cat["shapes"][req["shapes"][0]])[1]
         elif ctx.cmek_required and m in ("vms", "spot", "flex", "flex-group"):
             dis = "organization policy requires customer-managed disk keys"
+        elif m in ("vms", "spot", "flex", "flex-group") and not any(cat["shapes"][s].get("boot_disk") for s in req["shapes"]):
+            dis = "no boot disk type is known for these machine types (Google's disk-support tables do not cover them)"
         note = BILLING_NOTE[m]
+        if target == "vertex" and m in ("reservation", "calendar"):
+            note += " Shared with Vertex AI (serviceShareType ALLOW_ALL) so the endpoint can consume it."
+        elif target == "nim" and m in ("reservation", "calendar"):
+            note += " A GKE node pool consumes it through specific reservation affinity."
+        elif target == "nim":
+            note += " These are standalone VMs: a NIM runs on them directly, not as GKE nodes."
         if dis and ctx.opts.get("cmd") == "plan" and cap.get("ok") is False:
             # planning is analysis only: show the numbers, and say this account could not run it
             note = f"this account cannot run it ({dis}); planning only"
@@ -6300,7 +8449,7 @@ def wizard(ctx, req, args):
         choose_vm_options(ctx, req, args)
     elif m in ("reservation", "calendar"):
         t.line(t.s(" Reservations hold capacity with no VM running, so no operating system is chosen now: the VMs you later create to use the "
-                   "reservation pick their own image. " + DOCS["provisioning"][1], "c"))
+                   "reservation pick their own image. " + doc_addr(ctx, "provisioning"), "c"))
     if m == "spot":
         req["spot_action"] = ask.choose("When Google reclaims a Spot VM", [{"key": "DELETE", "label": "delete it (no disk charges after)"},
                                                                          {"key": "STOP", "label": "stop it (disk kept and billed)"}],
@@ -6378,7 +8527,7 @@ def choose_vm_options(ctx, req, args):
             next((g["project"] for g in usable if g["nvidia"]), usable[0]["project"])
         newest = next(g for g in usable if g["project"] == dgroup)
         proj = ask.choose(f"Operating system for the VMs ({arch or 'any'} images that support gVNIC networking, read {read})", gopts, default=dgroup,
-                          flag="--image", help_text=f"Images with the NVIDIA driver installed are ready for GPUs; others need it installed: {DOCS['drivers'][1]}",
+                          flag="--image", help_text=f"Images with the NVIDIA driver installed are ready for GPUs; others need it installed: {doc_addr(ctx, 'drivers')}",
                           alt={"skip": (dgroup, f"any operating system: the default, its newest version {newest['families'][0]['family']}; the version "
                                                 f"question is skipped too"),
                                "none": (None, "every VM boots an image; skip takes the default"), "all": (None, "a VM boots one image")})
@@ -6414,18 +8563,21 @@ def choose_vm_options(ctx, req, args):
     rows = []
     for s in shapes:
         rows.append([s["name"], f"{fnum(s['gpu_equiv'])} x {cat['accels'][s['accel']]['label']}", s["vcpus"], f"{s['mem_gib']:.0f}",
-                     s.get("cpu_arch") or "-", s["boot_disk"]])
+                     s.get("cpu_arch") or "-", s["boot_disk"] or "unknown"])
     for ln in table(["machine type", "GPUs attached", "vCPU", "memory GiB", "CPU", "boot disk type"], rows, t.width()):
         t.line(ln)
     t.line("")
     t.line(f"  provisioning model  {METHOD_LABEL[req['method']]}: {BILLING_NOTE[req['method']]}")
     t.line(f"  operating system    {req['image_label'] or req['image']}")
-    t.line(f"  boot disk           {req['boot_disk_gb']} GB, type set by the machine family as above")
+    t.line(f"  boot disk           {req['boot_disk_gb']} GB, type from Google's disk-support table for each machine type (GPUF_BOOT_DISKS sets the "
+           f"preference)")
     t.line(f"  network             {req['subnet'] or 'the default network, or any subnet in the region'}; gVNIC; no external IP address")
     t.line(f"  service account     {req.get('vm_service_account') or 'none attached'}")
     t.line("")
     for k in ("provisioning", "os", "drivers", "dlvm"):
-        t.line("  " + link(t, *DOCS[k]))
+        title_, url = doc_link(ctx, k)
+        if url:
+            t.line("  " + link(t, title_, url))
 
 
 def apply_args(req, args):
@@ -7254,7 +9406,7 @@ def setup(args, cmd):
     api.project = project
     opts = {"yes": args.yes, "image": getattr(args, "image", None), "ca_bundle": args.ca_bundle, "suggest_roles": True,
             "vm_service_account": getattr(args, "vm_service_account", None), "cmd": cmd,
-            "install_missing": getattr(args, "install_missing", False)}
+            "install_missing": getattr(args, "install_missing", False), "target": getattr(args, "target", None)}
     ctx = Ctx(term, ask, tokens, api, gov, events, project, stop, opts)
     ctx.rep = rep
     return ctx
@@ -7506,6 +9658,7 @@ def cmd_resume(args):
     ctx = setup(args, "resume")
     ctx.ev.path = os.path.join(run_dir(st["run_id"]), "events.jsonl")
     req = st["request"]
+    ctx.opts["target"] = (req.get("workload") or {}).get("target")
     heading(ctx, f"GCP GPU Finder {VERSION}: resume", f"run {st['run_id']}, project {ctx.project}")
     checks, fatal = checked_environment(ctx, regions=st["regions"], subnet=req.get("subnet"))
     if fatal:
@@ -7624,6 +9777,55 @@ def cmd_log(args):
     return 0
 
 
+def cmd_catalog(args):
+    """Everything NVIDIA publishes for Google Cloud that this tool sizes or lists, read live, and what each would be sized from."""
+    ctx = setup(args, "catalog")
+    t = ctx.t
+    catalog(ctx, refresh=args.refresh)
+    heading(ctx, f"GCP GPU Finder {VERSION}: NVIDIA on Google Cloud", f"project {ctx.project}; read live, nothing is created")
+    mg, mg_err = [], None
+    with ctx.rep.step("Reading NVIDIA models in Vertex AI Model Garden", f"publisher {MODEL_GARDEN_PUBLISHER}") as s:
+        try:
+            mg, read = model_garden(ctx, s, refresh=args.refresh)
+            s.result(f"{len(mg)} versions, read {read}")
+        except (ApiError, AuthError) as e:
+            mg_err = classify(e, ctx.project).title
+            s.result(f"not readable: {mg_err}", "y")
+    heading(ctx, "Vertex AI Model Garden", "sized by the configurations Google tested: one copy per replica VM")
+    rows = [[e["key"], e["kind"], e.get("precision") or "-", ", ".join(sorted({f"{c['machine']} ({c['gpus']})" for c in e["configs"]}))] for e in mg]
+    for ln in table(["version", "kind", "precision", "machine types Google tested (GPUs)"], rows, t.width()) if rows else [f"  none ({mg_err})"]:
+        t.line(ln)
+    with ctx.rep.step("Reading NVIDIA's NIM containers", "NGC catalog, public search") as s:
+        try:
+            nims, read = nim_list(ctx, s, refresh=args.refresh)
+            s.result(f"{len(nims)} NIMs, read {read}")
+        except PageError as e:
+            nims = []
+            s.result(f"not readable: {e.why}", "y")
+    slugs = {model_slug(e["key"]) for e in mg}
+    in_mg = lambda n: any(slug_related(n["slug"], x) for x in slugs)  # noqa: E731
+    heading(ctx, "NVIDIA NIM", f"{len(nims)} containers on NGC; sized by NVIDIA's NIM profiles (NIM Metadata API, tag {NIM_TAG}) for GKE or a VM")
+    linked = [n for n in nims if in_mg(n)]
+    shown = linked + [n for n in nims if not in_mg(n)][:max(0, 20 - len(linked))]
+    for ln in table(["NIM", "updated", "also in Model Garden"], [[n["id"], n["updated"], "yes" if in_mg(n) else ""] for n in shown], t.width()):
+        t.line(ln)
+    if len(nims) > len(shown):
+        t.line(t.s(f"  and {len(nims) - len(shown)} more; the wizard lists them all (python3 {os.path.basename(sys.argv[0])} --workload model --target nim)",
+                   "gr"))
+    opts, errors = read_catalog(ctx, refresh=args.refresh)
+    for kind, title, sub in (("product", "Products", "sized by NVIDIA's requirement floor"),
+                             ("blueprint", "Blueprints", "sized by the NIMs they run and the GPUs their manifests request"),
+                             ("sample", "Samples for Google Cloud", "sized by the NIMs and GPU requests they state"),
+                             ("image", "Marketplace VM images", "an operating system; NVIDIA publishes no GPU sizing with them")):
+        mine = [o for o in opts if o["kind"] == kind]
+        heading(ctx, f"{title} ({len(mine)})", sub)
+        for ln in table(["name", "what it states"], [[o["label"], o["note"]] for o in mine], t.width()) if mine else ["  none read"]:
+            t.line(ln)
+    for e in errors:
+        t.line(t.s(f"  not read: {e}", "y"))
+    return 0
+
+
 def cmd_knobs(args):
     for name, (val, default, doc) in sorted(KNOBS.items()):
         print(f"GPUF_{name}={val!r}" + ("" if val == default else f"  (default {default!r})") + f"\n    {doc}")
@@ -7662,7 +9864,7 @@ def build_parser():
     r.add_argument("--layout", choices=["spread", "cluster"])
     r.add_argument("--cluster-nodes", type=int)
     r.add_argument("--region", help="preferred regions or groups, best first (e.g. asia-southeast1)")
-    r.add_argument("--fallback", help="fallback regions or groups (e.g. asia-pacific), or none")
+    r.add_argument("--fallback", help="fallback regions or Google geographies (e.g. apac), or none")
     r.add_argument("--exclude", help="regions or groups never to use (e.g. us,europe), or none")
     r.add_argument("--method", choices=METHODS)
     r.add_argument("--image")
@@ -7690,9 +9892,13 @@ def build_parser():
     q.add_argument("--justification")
     q.add_argument("--use-case", help="one line on what the GPUs are for")
     n = common.add_argument_group("what the GPUs run (sizes the GPU count)")
-    n.add_argument("--workload", choices=["model", "product", "none"], help="an NVIDIA model in Model Garden, an NVIDIA product on Google Cloud, or none")
-    n.add_argument("--model", "--nemotron", dest="model", help="Model Garden version id or name fragment, e.g. super-120b-a12b-fp8")
-    n.add_argument("--product", help="NVIDIA product key or name fragment, e.g. omniverse-dev-ws, bionemo, or a Marketplace image name")
+    n.add_argument("--workload", choices=["model", "catalog", "product", "none"],
+                   help="an NVIDIA model (Model Garden or NIM), an NVIDIA blueprint, sample or product on Google Cloud (catalog; product is the same), or none")
+    n.add_argument("--target", choices=["vertex", "nim"], help="where the model runs: vertex (a Vertex AI endpoint from Model Garden) or nim "
+                                                               "(NVIDIA NIM on GKE or a VM); default GPUF_TARGET")
+    n.add_argument("--model", "--nemotron", dest="model", help="Model Garden version id, NIM id or name fragment, e.g. super-120b-a12b-fp8")
+    n.add_argument("--precision", help="weights precision of a NIM, e.g. fp8, nvfp4, bf16 (default: the model's own, else the smallest footprint)")
+    n.add_argument("--product", "--item", dest="product", help="name fragment of an NVIDIA blueprint, sample, product or Marketplace image, e.g. isaac, rag")
     n.add_argument("--context", type=int, help="longest prompt plus answer per request, in tokens")
     n.add_argument("--peak", "--concurrency", dest="peak", type=int, help="peak requests in flight at the same time, across all copies")
     n.add_argument("--units", type=int, help="model copies, workstations or jobs to run at the same time (when requests cannot be sized)")
@@ -7707,6 +9913,8 @@ def build_parser():
     for name, h in (("status", "what a run holds and filed"), ("resume", "continue a saved or stopped run"), ("release", "delete what a run created")):
         sp = sub.add_parser(name, parents=[common], help=h)
         sp.add_argument("run_id")
+    sub.add_parser("catalog", parents=[common], help="NVIDIA models, NIMs, blueprints, samples and products on Google Cloud, read live, with what "
+                                                    "each is sized from; creates nothing")
     sub.add_parser("self-test", help="offline checks of this file's logic")
     sub.add_parser("knobs", help="every GPUF_ setting with its value and default")
     lg = sub.add_parser("log", help="show an audit log as a readable list: the latest session, a run id, or a log file")
@@ -7728,7 +9936,7 @@ def main(argv=None):
     if cmd == "log":
         return cmd_log(args)
     fn = {"run": cmd_run, "plan": cmd_plan, "doctor": cmd_doctor, "setup": cmd_setup, "status": cmd_status, "resume": cmd_resume,
-          "release": cmd_release}[cmd]
+          "release": cmd_release, "catalog": cmd_catalog}[cmd]
     try:
         return fn(args)
     except KeyboardInterrupt:
@@ -7814,7 +10022,8 @@ def _test_ctx():
     def add(name, accel, gpus, frac, vcpus, mem, zones, family=None):
         shapes[name] = {"name": name, "base": name, "family": family or name.split("-")[0], "vcpus": vcpus, "mem_gib": mem, "accel": accel, "gpus": gpus,
                         "fraction": frac, "attached": False, "zones": zones, "regions": sorted({region_of(z) for z in zones}),
-                        "gpu_equiv": gpus * frac, "boot_disk": BOOT_DISK.get(name.split("-")[0], "pd-balanced"),
+                        "gpu_equiv": gpus * frac, "boot_disk": {"g2": "pd-balanced"}.get(name.split("-")[0], "hyperdisk-balanced"),
+                        "methods": None, "methods_row": None,
                         "gpu_mem_gb": {"nvidia-rtx-pro-6000": 96, "nvidia-h100-80gb": 80, "nvidia-l4": 24}[accel] * gpus * frac}
     z = ["asia-southeast1-a", "asia-southeast1-b"]
     for n, g, f, v in (("g4-standard-24", 1, 0.5, 24), ("g4-standard-48", 1, 1.0, 48), ("g4-standard-96", 2, 1.0, 96), ("g4-standard-192", 4, 1.0, 192),
@@ -7830,6 +10039,18 @@ def _test_ctx():
                      "vws": a != "nvidia-h100-80gb",
                      "shapes": sorted((s for s in shapes if shapes[s]["accel"] == a), key=lambda s: shapes[s]["gpu_equiv"])}
     ctx.catalog = {"accels": accels, "shapes": shapes, "regions": ["asia-southeast1", "asia-northeast1", "us-central1", "europe-west4", "australia-southeast2"]}
+    # what the published pages would give, in their own shapes, read by the same parsers the live run uses
+    cols = [method_columns()[m] for m in ("vms", "spot", "flex", "reservation", "calendar")]
+    PUBLISHED.update(facts={"consumption": parse_consumption({"rows": [["Machine series"] + cols, ["A3 High with less than 8 GPUs", "No", "Yes", "Yes", "No", "No"],
+                                                                         ["A3 High with 8 GPUs", "Yes", "Yes", "No", "Yes", "Yes"],
+                                                                         ["G4", "Yes", "Yes", "Yes", "Yes", "No"]]}),
+                            "series": {}, "gpus": [], "disks": {}, "n1": {}, "gpu_names": {},
+                            "geo": {"asia-southeast1": "apac", "asia-northeast1": "apac", "australia-southeast2": "apac", "us-central1": "north-america",
+                                    "europe-west4": "europe"}},
+                     refused={}, value_groups={"asia": {"asia-southeast1", "asia-northeast1"}},
+                     disk_quota={"hyperdisk-balanced": "HDB-TOTAL-GB-per-project-region", "pd-balanced": "SSD-TOTAL-GB-per-project-region"})
+    for s in shapes.values():
+        s["methods"], s["methods_row"] = shape_methods(s)
     book = QuotaBook()
     book.infos = QuotaBook.parse_infos(SAMPLE_QUOTA_INFOS)
     book.families = {"NVIDIA_RTX_PRO_6000"}
@@ -7934,22 +10155,22 @@ class SelfTest(unittest.TestCase):
         self.assertEqual((e["configs"][0]["kv_dtype"], e["configs"][0]["mem_frac"], e["configs"][0]["max_seqs"]), ("fp8", 0.9, 512))
         info = {"weights_gb": 128.4, "kv": kv}
         rows, notes = mg_fit(ctx, e, 32768, info)
-        # one copy needs 2 GPUs in one VM: 1-GPU and half-GPU machine types drop out; H200 is not in this project's catalog
-        self.assertEqual(sorted(r["shape"] for r in rows), ["a3-highgpu-2g", "a3-highgpu-4g", "a3-highgpu-8g", "g4-standard-192", "g4-standard-384",
-                                                            "g4-standard-96"])
+        # Vertex AI runs one copy per replica VM on the machine types Google tested, never packed onto a larger one;
+        # H200 is not in this project's catalog
+        self.assertEqual(sorted(r["shape"] for r in rows), ["a3-highgpu-2g", "g4-standard-96"])
         self.assertTrue(any("a3-ultragpu-8g" in n for n in notes))
         g96 = next(r for r in rows if r["shape"] == "g4-standard-96")
         self.assertEqual((g96["per_copy"], g96["copies_vm"], g96["tested"]), (2, 1, True))
-        self.assertEqual(next(r for r in rows if r["shape"] == "g4-standard-384")["copies_vm"], 4)
         seq = per_request_gb(info, 32768, g96["cfg"])
         self.assertAlmostEqual(seq, (kv["kv_per_token"] / FIT_KV_BYTES * 32768 + kv["ssm_per_seq"]) / 1e9)
-        self.assertEqual(g96["capacity"], int((2 * (96 * 0.9 - FIT_RUNTIME_GB) - 128.4) // seq))
+        self.assertEqual(g96["capacity"], min(512, int((2 * (96 * 0.9 - FIT_RUNTIME_GB) - 128.4) // seq)))
         plan = plan_units(rows, peak=g96["capacity"] * 3)
         g96 = next(r for r in plan if r["shape"] == "g4-standard-96")
-        g384 = next(r for r in plan if r["shape"] == "g4-standard-384")
         self.assertEqual((g96["units"], g96["vms"], g96["gpus_total"]), (3, 3, 6))
-        self.assertEqual((g384["vms"], g384["gpus_total"]), (1, 8))
-        self.assertEqual(plan[0]["gpus_total"], 6)
+        self.assertEqual(plan[0]["shape"], "g4-standard-96")
+        # Google's sentence on reservations for Vertex AI online inference, as published
+        m = re.search(VERTEX_SPARE_RX, "SPECIFIC_RESERVATION: Must specify at least 1 additional VM; we recommend 10% (but at least 1).", re.I)
+        self.assertEqual(m.groups(), ("1", "10"))
         # a context longer than every length Google tested on a GPU removes that GPU
         e2 = dict(e, configs=[dict(c, max_len=4096) if c["accel"] == "nvidia-h100-80gb" else c for c in e["configs"]])
         rows2, notes2 = mg_fit(ctx, e2, 32768, info)
@@ -7985,6 +10206,8 @@ class SelfTest(unittest.TestCase):
                          ("Deep Learning VM with CUDA (Google), NVIDIA driver installed", 2,
                           "projects/deeplearning-platform-release/global/images/family/pytorch-2-9-cu129-ubuntu-2404-nvidia-580"))
         self.assertEqual(serving_args(["--tp=4", "--context-length=262144", "--x=y"]), {"tp": 4, "max_len": 262144})
+        a = serving_args(["--tensor-parallel-size=2", "--data-parallel-size=4", "--enable-expert-parallel", "--model=gs://b/nvidia/Model-FP8"])
+        self.assertEqual((a.get("tp"), a.get("dp"), bool(a.get("ep")), a.get("model_path")), (2, 4, True, "gs://b/nvidia/Model-FP8"))
 
     def test_theme(self):
         self.assertEqual(xterm256(hex_rgb("#76b900")), 106)
@@ -8234,7 +10457,8 @@ class SelfTest(unittest.TestCase):
 
     def test_regions_and_policy(self):
         known = {"asia-southeast1", "asia-northeast1", "australia-southeast2", "us-central1", "europe-west4"}
-        self.assertEqual(expand_regions(["asia-southeast1", "asia-pacific"], known), ["asia-southeast1", "asia-northeast1", "australia-southeast2"])
+        _test_ctx()
+        self.assertEqual(expand_regions(["asia-southeast1", "apac"], known), ["asia-southeast1", "asia-northeast1", "australia-southeast2"])
         self.assertEqual(expand_regions(["us"], known), ["us-central1"])
         self.assertRaises(SystemExit, expand_regions, ["mars"], known)
         pol = {"listPolicy": {"allowedValues": ["in:asia-locations"]}}
@@ -8256,6 +10480,64 @@ class SelfTest(unittest.TestCase):
         self.assertLessEqual(len(n), 63)
         self.assertRegex(n, r"^[a-z][a-z0-9-]*$")
         self.assertEqual(safe_name("Gpuf", "--A_b", limit=63), "gpuf-a-b")
+
+    def test_nvidia_sources(self):
+        ctx = _test_ctx()
+        cat = ctx.catalog
+        # NVIDIA's NIM support matrix, three shapes it publishes: a requirement row, a GPU list only, an optimized-configuration table
+        page = {"url": "https://docs.nvidia.com/nim/x/latest/support-matrix.html", "tables": [
+            {"head": "Models", "path": "Support Matrix / Models", "rows": [["Model", "Model ID"], ["Embed One", "nvidia/embed-1b-v2"]]},
+            {"head": "Embed One", "path": "Support Matrix / Embed One", "rows": [["GPU", "Precision"], ["NVIDIA L4", "FP16"], ["NVIDIA H100 NVL", "FP16 and FP8"]]},
+            {"head": "Embed One", "path": "Support Matrix / Embed One", "rows": [["GPUs", "GPU Memory", "Precision"],
+                                                                                 ["Any NVIDIA GPU with sufficient GPU memory", "Min: 3.6, Max: 9", "FP16"]]},
+            {"head": "Page Elements v3", "path": "Support Matrix / Page Elements v3", "rows": [["GPU", "Precision"], ["NVIDIA L4", "FP16"]]},
+            {"head": "llama-3.1-8b-instruct", "path": "Support Matrix / LLMs / llama-3.1-8b-instruct",
+             "rows": [["Precision", "TP", "GPU", "LoRA"], ["NVFP4", "1", "NVIDIA-RTX-PRO-6000", "No"], ["FP8", "2", "NVIDIA-H100-80GB-HBM3", "Yes"]]}]}
+        emb = support_matrix_rows(page, "embed-1b-v2")
+        self.assertEqual([(p["precision"], p["tp"], p["min_vram"], p["gpu"]) for p in emb], [("fp16", 1, 3.6, None)])
+        self.assertEqual(emb[0]["doc_gpus"], ["NVIDIA L4", "NVIDIA H100 NVL"])
+        self.assertEqual([(p["gpu"], p["tp"]) for p in support_matrix_rows(page, "nemotron-page-elements-v3")], [])
+        self.assertEqual([(p["gpu"], p["tp"]) for p in support_matrix_rows(page, "page-elements-v3")], [("NVIDIA L4", 1)])
+        llm = support_matrix_rows(page, "llama-3.1-8b-instruct")
+        self.assertEqual([(p["precision"], p["tp"], p["gpu"], p["lora"]) for p in llm], [("nvfp4", 1, "NVIDIA-RTX-PRO-6000", False),
+                                                                                         ("fp8", 2, "NVIDIA-H100-80GB-HBM3", True)])
+        # validation follows NVIDIA's lists: L4 is listed, the RTX PRO 6000 is not, so the memory floor alone sizes it
+        names = pci_names([])
+        self.assertTrue(nim_validated(emb[0], "nvidia-l4", cat, names))
+        self.assertFalse(nim_validated(emb[0], "nvidia-rtx-pro-6000", cat, names))
+        self.assertFalse(nim_gpu_matches("NVIDIA H100 NVL", "nvidia-h100-80gb", cat))
+        self.assertEqual(nim_need(emb, "nvidia-rtx-pro-6000", cat)[0], 1)
+        # a precision NVIDIA validated only on another architecture is not the first choice
+        prof = [{"gpu": None, "precision": "nvfp4", "tp": 1, "pp": 1, "min_vram": 70, "lora": False, "tested": [], "doc_gpus": ["NVIDIA RTX PRO 6000"]},
+                {"gpu": None, "precision": "fp8", "tp": 2, "pp": 1, "min_vram": 60, "lora": False, "tested": [], "doc_gpus": []}]
+        self.assertEqual(nim_need(prof, "nvidia-h100-80gb", cat)[1]["precision"], "fp8")
+        self.assertEqual(nim_need(prof, "nvidia-rtx-pro-6000", cat)[1]["precision"], "nvfp4")
+        # a blueprint's own repository: shares a word with its name, not merely the most linked
+        bp = {"links": [{"href": "https://github.com/NVIDIA-AI-Blueprints/rag"}] * 5 + [{"href": "https://github.com/NVIDIA-AI-Blueprints/deep-researcher-agent"}]}
+        self.assertEqual(blueprint_repo(bp, ["nvidia-ai-blueprints"], "deep-researcher-agent"), "NVIDIA-AI-Blueprints/deep-researcher-agent")
+        self.assertIsNone(blueprint_repo(bp, ["nvidia-ai-blueprints"], "telco-network-configuration"))
+        self.assertEqual(blueprint_repo({"links": [{"href": "https://github.com/rapidsai/gqe"}]}, [], "gpu-query-engine", "GPU Query Engine (GQE)"),
+                         "rapidsai/gqe")
+        # a sample is a notebook named for NVIDIA, or the README folder holding an NVIDIA-named file; hidden folders are not samples
+        paths = ["ai-ml/serve/README.md", "ai-ml/serve/src/triton-model-repository", "ai-ml/serve/src/client/triton_client.py",
+                 "notebooks/nvidia_nim_intro.ipynb", ".github/dict/nvidia.txt"]
+        self.assertEqual(tree_items(paths, "", False, {"ai-ml/serve/src/triton-model-repository"}), ["notebooks/nvidia_nim_intro.ipynb", "ai-ml/serve"])
+        # NVIDIA's GPU rules: architectures its renderer does not support, and GPUs it lists without RT cores
+        rules = gpu_rules({"blocks": ["Older GPU architectures such as Tesla, Pascal and Volta are not supported by the Omniverse RTX Renderer.",
+                                      "GPUs without RT Cores (A100, H100) are not supported."],
+                           "tables": [{"rows": [["GPU Architecture", "Compute Capability"], ["Blackwell (RTX) Pro", "12.0"], ["Hopper H100/H200", "9.0"],
+                                                ["Ada Lovelace", "8.9"]]}]})
+        self.assertEqual((rules["bad_archs"], rules["no_rt"], rules["needs_rt"]), (["pascal", "tesla", "volta"], ["H100", "H200"], True))
+        self.assertTrue(gpu_model_in("NVIDIA GB200 192GB", ["B200"]))
+        self.assertFalse(gpu_model_in("NVIDIA L4", ["H100", "A100"]))
+        # a reservation for a Vertex AI endpoint is shared with Google services, as Vertex AI requires; one for VMs is not
+        hunt = type("H", (), {"st": {"run_id": "r"}, "req": {"workload": {"target": "vertex"}}})()
+        g96 = dict(cat["shapes"]["g4-standard-96"])
+        body = Hunt.reservation_body(hunt, g96, 2, "gpuf-r1")
+        self.assertEqual((body["reservationSharingPolicy"], body["specificReservation"]["count"], body["specificReservationRequired"]),
+                         ({"serviceShareType": "ALLOW_ALL"}, "2", True))
+        hunt.req = {"workload": {"target": "nim"}}
+        self.assertNotIn("reservationSharingPolicy", Hunt.reservation_body(hunt, g96, 2, "gpuf-r1"))
 
     def test_targets_and_verdict(self):
         ctx = _test_ctx()

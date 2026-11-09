@@ -38,12 +38,13 @@ Every screenshot below is a real run of this file against Google Cloud, rendered
 
 *When one of the quotas a plan needs was denied before, the tool files none of them: raising the others alone would not let the plan run.*
 
-### Sizes GPUs For NVIDIA Models In Vertex AI Model Garden
+### Sizes GPUs The Way NVIDIA And Google Deploy Them
 
-- Lists NVIDIA's models in Vertex AI Model Garden live from the Agent Platform API, every version, with every machine type, GPU type, GPU count and serving setting Google tested for it. Only GPUs Google tested for that model are offered.
-- Asks two questions about your traffic: the longest request (prompt plus answer, in tokens) and the peak requests in flight at once, across all copies.
-- Reads the model's published architecture and weight size from the repository Model Garden deploys, and estimates how many requests one copy of the model holds at once on each tested machine type: GPU memory left after the weights, over the cache a request needs, capped by Google's own concurrency setting.
-- Recommends the total: model copies needed, VM instances needed, GPUs in total, fewest GPUs first, and makes that recommendation the default for every later question. GPU types and machine types that cannot fit the model are hidden and the reason is printed.
+Nothing about GPUs, machines, models or products is built into the file: every table is read live from Google's and NVIDIA's own pages and APIs, so a new release appears and a withdrawn one disappears. Each sizing row says what it is sized by.
+
+- **On a Vertex AI endpoint:** NVIDIA's models in Model Garden, read live from the Agent Platform API with every machine type, GPU count and serving setting Google tested (tensor, pipeline, data and expert parallelism, context length, concurrency). Only those machine types are offered, one copy of the model per replica VM, never packed onto a larger VM, plus the spare VMs Google asks a reservation for Vertex AI to hold. The reservation is created shared with Google services (`serviceShareType` `ALLOW_ALL`), which Vertex AI needs, and the project's Vertex AI serving quota is shown beside its Compute Engine quota.
+- **As an NVIDIA NIM on GKE or a VM:** NVIDIA's NIM list from the NGC catalog and each NIM's profiles from NVIDIA's NIM Metadata API: GPU, GPU count, precision, memory floor, and the GPUs NVIDIA validated each profile on. A profile NVIDIA validated on that GPU is recommended first; a row that only meets the memory floor says so. Where a NIM's metadata names no GPU, NVIDIA's NIM support matrix is read instead. Without network access to NVIDIA or without an NGC key, a dated snapshot of both built into the file is used.
+- **Your traffic:** the longest request (prompt plus answer, in tokens) and the peak requests in flight at once. The tool reads the model's published architecture and weights and estimates the requests one copy holds on each machine type, capped by the serving setting, then recommends model copies, VM instances and GPUs in total, fewest GPUs first.
 
 ![NVIDIA models listed live from Model Garden with the machine types Google tested](docs/screenshots/model-garden-models.png)
 
@@ -51,17 +52,18 @@ Every screenshot below is a real run of this file against Google Cloud, rendered
 
 ![Sizing Nemotron 3 Super 120B FP8 for 100 requests at 32768 tokens](docs/screenshots/model-garden-sizing.png)
 
-*NVIDIA Nemotron 3 Super 120B FP8 at 32,768 tokens and 100 requests in flight: every machine type that holds a whole copy, the requests one copy serves, estimated from the model's weights and attention layout, and the recommendation of one g4-standard-96 with 2 x RTX PRO 6000, which becomes the default.*
+*Recorded with version 1.6.1, which also listed larger machine types holding several copies. From 1.7.0 a Vertex AI endpoint is sized only on the machine types Google tested, one copy per replica: for this model and traffic, 2 x g4-standard-96 (one replica and the spare VM Google asks for).*
 
-### Sizes GPUs For NVIDIA Products On Google Cloud Marketplace
+### Sizes NVIDIA Blueprints, Samples And Products
 
-- Knows the NVIDIA products Google documents for Google Cloud: Omniverse Development and Enterprise Workstations, Isaac Sim Development Workstation, Kit App Streaming, BioNeMo and NIM, each with the GPU rule from Google's own page and links to it.
-- Reads NVIDIA's Marketplace VM images live from NVIDIA's image project, newest current image per product, with its operating system, CPU architecture, minimum disk and whether Google charges a license fee, and boots your VMs from the one you pick.
-- Asks how many workstations, streaming nodes or jobs run at the same time, then recommends machine type, VM count and GPUs in total the same way it does for models.
+- **Blueprints and samples:** NVIDIA's blueprints from the NGC catalog, each linked to its GitHub repository through NVIDIA's blueprint page, and samples from NVIDIA's and Google's repositories (`GPUF_CATALOG_SOURCES`), with their Google Cloud deployment paths, the GPUs their manifests request and the NIMs they run. A blueprint is sized by its NIMs and GPU requests; a part NVIDIA publishes no sizing for is named, never guessed.
+- **Products:** Isaac Sim, Omniverse Kit and the others in `GPUF_PRODUCT_PAGES` are sized by NVIDIA's own requirement pages: RAM, cores, GPU memory, driver, and NVIDIA's GPU rules (architectures its RTX renderer does not support; GPUs without RT cores where the product says so). A machine type NVIDIA's Google Cloud page names but that falls short of NVIDIA's own minimum is reported, not recommended.
+- **Marketplace images:** NVIDIA's Marketplace VM images read live from NVIDIA's image project, newest current image per product, with its operating system, CPU architecture, minimum disk and whether Google charges a license fee.
+- `catalog` lists all of it, read live, without creating anything.
 
 ![NVIDIA products on Google Cloud and the sizing for four Isaac Sim workstations](docs/screenshots/marketplace-sizing.png)
 
-*The NVIDIA products on Google Cloud, the last one read live from NVIDIA's Marketplace image project, and four Isaac Sim Development Workstations sized by Google's GPU rule: 4 x g2-standard-4 with one L4 each is recommended.*
+*Recorded with version 1.6.1, which sized products by Google's GPU rule and recommended g2-standard-4. From 1.7.0 products are sized by NVIDIA's requirement page: g2-standard-4 falls short of Isaac Sim's minimum of 32 GB RAM and 4 cores, and n1-standard-8 with one T4 is recommended.*
 
 ### Recommends From What Is Available And What You Need
 
@@ -77,8 +79,8 @@ Every screenshot below is a real run of this file against Google Cloud, rendered
 ### Searches As Narrowly Or As Broadly As You Want
 
 - Narrow: one region, one machine type, one method, one zone at a time; or a cluster layout that only accepts whole groups of VMs in a single zone.
-- Broad: regions by name, by group (`asia-pacific`, `europe`) or by prefix (`asia`), a fallback list, an exclusion list, several machine types in preference order, and `all` at any question to open it up to every region or every machine type that offers your GPU.
-- Six ways to hold capacity, chosen per run: on-demand reservation, on-demand VMs, Spot VMs, flex-start VMs and flex-start groups (Dynamic Workload Scheduler), and calendar-mode future reservations for the A3 and A4 families.
+- Broad: regions by name, by Google's geography (`apac`, `europe`, `north-america`) or by prefix (`asia`), a fallback list, an exclusion list, several machine types in preference order, and `all` at any question to open it up to every region or every machine type that offers your GPU.
+- Six ways to hold capacity, chosen per run: on-demand reservation, on-demand VMs, Spot VMs, flex-start VMs and flex-start groups (Dynamic Workload Scheduler), and calendar-mode future reservations. Which machine series offer each method is read from Google's consumption-option table.
 - Every question accepts a flag, so the same search can be scripted; `--dry-run` runs one full pass of the search without a single write.
 
 ![Regions grouped by geography, preferred and fallback answers, and the six holding methods](docs/screenshots/search-regions.png)
@@ -117,12 +119,14 @@ python3 gcp_gpu_finder.py            # the wizard asks everything, then holds th
 
 Every question has a default, a skip (`>`), a skip-all (`>>`), a back (`<`) and a flag, so the same run can be scripted. Ctrl-C stops new attempts, prints a summary and asks whether to keep or release what was obtained.
 
-A sized, scripted example: size for an NVIDIA model in Model Garden at a given context length and peak concurrency, search a preferred region with the rest of a continent as fallback, hold the capacity as Spot VMs, and let the tool offer a quota request if quota turns out to be the limit.
+A sized, scripted example: size an NVIDIA model as a NIM on GKE at a given context length and peak concurrency, search a preferred region with the rest of its geography as fallback, hold the capacity as Spot VMs, and let the tool offer a quota request if quota turns out to be the limit.
 
 ```
-python3 gcp_gpu_finder.py --workload model --model super-120b-a12b-fp8 --context 8192 --peak 32 \
-    --region asia-southeast1 --fallback asia-pacific --method spot --quota-request offer --session logged
+python3 gcp_gpu_finder.py --workload model --target nim --model super-120b-a12b-fp8 --context 8192 --peak 32 \
+    --region asia-southeast1 --fallback apac --method spot --quota-request offer --session logged
 ```
+
+For a Vertex AI endpoint use `--target vertex` with `--method reservation` or `--method calendar`; for a blueprint or sample, `--workload catalog --item rag`; for a product, `--workload product --product isaac`.
 
 ## Commands
 
@@ -131,6 +135,7 @@ python3 gcp_gpu_finder.py --workload model --model super-120b-a12b-fp8 --context
 - `doctor` environment and permission report, with the exact command or link that fixes each finding.
 - `run --config F` replay a saved run's answers; add `--yes --session logged` for an unattended run.
 - `status RUN_ID`, `resume RUN_ID`, `release RUN_ID` what a run holds, continue a stopped run, delete only what that run created.
+- `catalog` NVIDIA on Google Cloud, read live: Model Garden models, NIMs, products, blueprints, samples and Marketplace images.
 - `log [RUN_ID|PATH]` read an audit log back; `knobs` every tunable setting and its default; `self-test` offline checks of this file.
 
 `--help` on any command lists its flags. The file header is the full manual.
@@ -143,7 +148,9 @@ You choose one method per run. All of them create real, billed resources in your
 - `vms` standard on-demand VMs created in bulk.
 - `spot` Spot VMs, much cheaper, reclaimable by Google at any time.
 - `flex` and `flex-group` flex-start (Dynamic Workload Scheduler) VMs, queued per request, discounted, deleted after their run time.
-- `calendar` calendar-mode future reservation for the A3 and A4 families, no quota needed, billed for the whole period.
+- `calendar` calendar-mode future reservation, no quota needed, billed for the whole period.
+
+Which machine series offer each method comes from Google's consumption-option table. For a Vertex AI endpoint only `reservation` (shared with Google services, as Vertex AI requires) and `calendar` apply.
 
 ## What It Never Does
 
@@ -163,7 +170,9 @@ The tool never handles long-lived credentials itself. It holds short-lived acces
 - Tokens come from `gcloud auth print-access-token` (optionally with `--impersonate-service-account`), from the Compute Engine metadata server, or from `GPUF_ACCESS_TOKEN` when you supply one. They are refreshed on a schedule and never written to disk, the audit log or the screen. If the token command fails, only its error text is reported, never its output.
 - A key file (`--key-file`) is handed to `gcloud auth login --cred-file` and read by the tool only for its type, account and project. When another account is already active, the sign-in goes into a separate gcloud configuration (`GPUF_SETUP_GCLOUD_CONFIG`, default `gpu-finder`) so your own setup is untouched.
 - gcloud's own token cache lives where gcloud keeps it; in an ephemeral session it lives in a tmpfs copy that is deleted when the session ends.
-- Network calls go to `*.googleapis.com`, `huggingface.co` (a chosen model's public architecture file, no token), the metadata server on GCE, and `dl.google.com` only when setup installs gcloud. `HTTPS_PROXY`, `NO_PROXY`, `--ca-bundle` and `GPUF_CA_BUNDLE` are honored. The gcloud download is verified over TLS; set `GPUF_GCLOUD_SHA256` to the checksum Google publishes to pin it.
+- An NGC key is optional. With one, the tool reads a NIM's NGC record (to find NVIDIA's support matrix for NIMs whose metadata names no GPU) and its model card (NVIDIA's stated minimum GPUs). It is taken from `GPUF_NGC_API_KEY` or `NGC_API_KEY`, else from the `nvcr.io` login enroot keeps for container pulls, else a hidden prompt, and is held in memory only: never shown, logged, cached or written. Without one, a dated snapshot of NVIDIA's NIM profiles and support matrices built into the file stands in, and the screen says so.
+- A GitHub token is optional: `GPUF_GITHUB_TOKEN` (or `GITHUB_TOKEN`) raises GitHub's limit of 60 unauthenticated calls an hour for reading blueprint and sample repositories; repository reads are cached for a day and revalidated by ETag.
+- Network calls go to `*.googleapis.com`, `docs.cloud.google.com` (Google's published tables), `huggingface.co` (a chosen model's public architecture file, no token), `api.ngc.nvidia.com`, `docs.nvidia.com` and NVIDIA's product documentation sites, `build.nvidia.com`, `api.github.com` and `raw.githubusercontent.com`, the metadata server on GCE, and `dl.google.com` only when setup installs gcloud. `HTTPS_PROXY`, `NO_PROXY`, `--ca-bundle` and `GPUF_CA_BUNDLE` are honored. The gcloud download is verified over TLS; set `GPUF_GCLOUD_SHA256` to the checksum Google publishes to pin it.
 
 ## Sessions And Files
 
@@ -193,7 +202,9 @@ python3 -m py_compile gcp_gpu_finder.py
 python3 gcp_gpu_finder.py self-test
 ```
 
-The self-test runs offline and covers the parser, the request planner, the quota verdict, the Model Garden sizing, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
+The self-test runs offline and covers the parser, the request planner, the quota verdict, the Model Garden sizing, the readers of NVIDIA's NIM support matrices, blueprint pages, sample trees and GPU rules, the Vertex AI reservation body, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
+
+The built-in NIM snapshot carries the date it was read, and the screen shows that date whenever the snapshot is used; the maintainer refreshes it from NVIDIA's live sources at each release.
 
 ## Reporting A Problem
 
