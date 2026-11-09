@@ -2,7 +2,7 @@
 
 Find NVIDIA GPU capacity on Google Cloud and keep trying until it is held.
 
-One Python file, standard library only, nothing to install. It signs you in through the Google Cloud CLI (or the metadata server on a Compute Engine VM), checks your project, works out how many GPUs your NVIDIA model or product actually needs, tells you whether quota or availability is what stands in your way, files the exact quota increase if you ask it to, then sweeps regions, zones, machine types and acquisition methods, for days or weeks if needed, taking GPUs as they appear until every one you asked for is yours. Everything it does is printed as it happens and written to an append-only audit log.
+One Python file, standard library only, nothing to install. It signs you in through the Google Cloud CLI (or the metadata server on a Compute Engine VM), checks your project, works out how many GPUs your NVIDIA model, NIM, blueprint or product actually needs, the way Google and NVIDIA publish its deployment (a Vertex AI endpoint on the machine types Google tested, or an NVIDIA NIM on the profiles NVIDIA validated), tells you whether quota or availability is what stands in your way, files the exact quota increase if you ask it to, then sweeps regions, zones, machine types and acquisition methods, for days or weeks if needed, taking GPUs as they appear until every one you asked for is yours. Everything it reads and does is printed as it happens and written to an append-only audit log.
 
 ## Why It Exists
 
@@ -204,9 +204,19 @@ python3 -m py_compile gcp_gpu_finder.py
 python3 gcp_gpu_finder.py self-test
 ```
 
-The self-test runs offline and covers the parser, the request planner, the quota verdict, the Model Garden sizing, the readers of NVIDIA's NIM support matrices, blueprint pages, sample trees and GPU rules, the Vertex AI reservation body, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
+The self-test runs offline and covers the parser, the request planner, the quota verdict, the Model Garden sizing, the readers of NVIDIA's NIM support matrices, blueprint pages, sample trees and GPU rules, the Vertex AI reservation body, the progress lines, the audit trail and its file permissions, the token error path, archive extraction safety and the setup helpers. `ruff check gcp_gpu_finder.py` passes with no findings.
 
 The built-in NIM snapshot carries the date it was read, and the screen shows that date whenever the snapshot is used; the maintainer refreshes it from NVIDIA's live sources at each release.
+
+## Changes In 1.7.0
+
+- **Sized by deployment target:** `--target vertex` sizes a Vertex AI endpoint only on the machine types Google tested for the model, one copy per replica VM plus the spare VMs Google asks for; `--target nim` sizes an NVIDIA NIM by NVIDIA's profiles, the ones NVIDIA validated on that GPU first. Earlier versions also listed larger machine types holding several copies, which Vertex AI does not deploy.
+- **Vertex AI holds:** reservations for a Vertex AI endpoint are shared with Google services (`ALLOW_ALL`), only reservation and calendar mode are offered for it, and Vertex AI serving quota is shown beside Compute Engine quota.
+- **NVIDIA catalog:** the new `catalog` command and wizard choice list Model Garden models, NIMs, NVIDIA blueprints with their GitHub repositories, Google Cloud samples, products and Marketplace images, all read live.
+- **Products:** Isaac Sim, Omniverse Kit and the others are sized by NVIDIA's requirement pages and GPU rules instead of a built-in list.
+- **Nothing built in:** GPU memory and architecture, machine series, holding methods, boot disks, disk quotas, price words, geographies, location groups and documentation addresses are read from Google's and NVIDIA's pages; a dated NIM snapshot stands in only when NVIDIA cannot be reached or no NGC key is available.
+- **Visible progress:** every read is named before it is made, long steps report each item and say what they are still reading when they have been quiet for `GPUF_PROGRESS_S` seconds, and a source that cannot be read is reported when it fails.
+- **Region groups:** fallback and exclusion groups use Google's geography names (`apac`, `europe`, `north-america`); `asia-pacific` is no longer a group name.
 
 ## Reporting A Problem
 
